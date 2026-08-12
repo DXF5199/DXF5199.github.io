@@ -1,0 +1,39 @@
+name: 自动更新指数全收益数据
+
+on:
+  schedule:
+    # 每个交易日晚上 23:30（北京时间，对应 UTC 15:30）自动运行
+    - cron: '30 15 * * 1-5'
+  workflow_dispatch: # 支持手动触发
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码库
+        uses: actions/checkout@v4
+
+      - name: 设置 Python 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: 安装依赖包
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests akshare pandas numpy
+
+      - name: 运行自动化更新脚本
+        run: |
+          python auto_update_indices.py
+
+      - name: 提交并推送更新后的 HTML 文件
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          # 自动识别仓库中的 HTML 文件（假设名为 指数全收益定投策略.html）
+          git add 指数全收益定投策略.html
+          git commit -m "chore: 自动更新每日最新指数全收益点位数据 [skip ci]" || echo "没有检测到数据变化"
+          git push
