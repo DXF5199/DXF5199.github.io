@@ -42,10 +42,12 @@ def fetch_cni_history(code):
     return {}
 
 def calculate_rolling_quantiles(drawdowns, window_years, quantile_levels):
+    """高性能滚动分位线计算"""
     window_size = int(252 * window_years)
     s = pd.Series(drawdowns)
     results = {}
     for q in quantile_levels:
+        # 使用 pandas 的 rolling().quantile，这是目前最稳健的高性能实现
         rolling_q = s.rolling(window=window_size, min_periods=1).quantile(q/100.0)
         results[q] = [round(float(v), 2) for v in rolling_q]
     return results
@@ -64,6 +66,7 @@ def find_points(prices, is_high=True, window=120):
 def update_index_calculations(data_obj):
     values = data_obj["values"]
     prices = np.array(values)
+    n_total = len(prices)
     
     # 1. 计算回撤
     max_prices = np.maximum.accumulate(prices)
@@ -84,7 +87,6 @@ def update_index_calculations(data_obj):
     }
     
     # 3. 对数回归通道 (近10年)
-    n_total = len(prices)
     n_10y = min(n_total, 252 * 10)
     start_idx = n_total - n_10y
     
@@ -102,8 +104,8 @@ def update_index_calculations(data_obj):
         annual_ret = (np.exp(slope * 252) - 1) * 100
         return line.tolist(), round(float(annual_ret), 2)
 
-    top_line, high_ret = get_line(high_pts, n_total)
-    bottom_line, low_ret = get_line(low_pts, n_total)
+    reg_high, high_ret = get_line(high_pts, n_total)
+    reg_low, low_ret = get_line(low_pts, n_total)
     
     x_base = np.arange(n_10y)
     y_base = np.log(prices_10y)
@@ -111,9 +113,10 @@ def update_index_calculations(data_obj):
     intercept_global = intercept_b - slope_b * start_idx
     regression_line = slope_b * np.arange(n_total) + intercept_global
     
+    # 修正字段名映射，确保 HTML 能正确读取
     data_obj["regression"] = [round(float(v), 4) for v in regression_line]
-    data_obj["top_line"] = [round(float(v), 4) for v in top_line]
-    data_obj["bottom_line"] = [round(float(v), 4) for v in bottom_line]
+    data_obj["reg_high"] = [round(float(v), 4) for v in reg_high]
+    data_obj["reg_low"] = [round(float(v), 4) for v in reg_low]
     data_obj["high_points"] = [[int(p[0]), round(float(p[1]), 4)] for p in high_pts]
     data_obj["low_points"] = [[int(p[0]), round(float(p[1]), 4)] for p in low_pts]
     data_obj["annual_return_high"] = high_ret
@@ -144,6 +147,7 @@ def update_html(file_path):
         if recent_data:
             for d_str, price in sorted(recent_data.items(), key=lambda x: x[0]):
                 if d_str in dates:
+                    idx = dates.index(date_str if 'date_str' in locals() else d_str) # 修复潜在变量错误
                     idx = dates.index(d_str)
                     if abs(values[idx] - price) > 0.001:
                         values[idx] = price
@@ -153,15 +157,15 @@ def update_html(file_path):
                     values.append(price)
                     index_updated = True
         
-        # 强制检查：如果派生数据长度与日期长度不符，也触发重新计算
+        # 强制检查：如果派生数据长度与日期长度不符，或者字段缺失，也触发重新计算
         q_lines = all_data[name].get("quantile_lines", {})
         q_len = len(next(iter(q_lines.values()))) if q_lines else 0
-        if index_updated or q_len != len(dates) or len(all_data[name].get("top_line", [])) != len(dates):
+        if index_updated or q_len != len(dates) or len(all_data[name].get("reg_high", [])) != len(dates):
             combined = sorted(zip(dates, values), key=lambda x: x[0])
             all_data[name]["dates"] = [x[0] for x in combined]
             all_data[name]["values"] = [x[1] for x in combined]
             
-            print(f"正在为 {name} 重新计算分位线和回归通道...")
+            print(f"正在为 {name} 重新计算所有图表指标...")
             update_index_calculations(all_data[name])
             updated_any = True
 
