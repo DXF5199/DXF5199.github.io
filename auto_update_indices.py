@@ -42,14 +42,22 @@ def fetch_cni_history(code):
     return {}
 
 def calculate_rolling_quantiles(drawdowns, window_years, quantile_levels):
-    """高性能滚动分位线计算"""
-    window_size = int(252 * window_years)
+    """
+    对齐 Excel 的滚动分位线计算:
+    1. 窗口大小: 5年=1218天, 10年=2431天 (参考 Excel 选区)
+    2. 分位逻辑: Excel 的 70%分位线使用 PERCENTILE.INC(..., 0.3), 即 (100-q)/100
+    3. 显示逻辑: 前面不足窗口期的数据设为 null (不显示)
+    """
+    window_size = 1218 if window_years == 5 else 2431
     s = pd.Series(drawdowns)
     results = {}
     for q in quantile_levels:
-        # 使用 pandas 的 rolling().quantile，这是目前最稳健的高性能实现
-        rolling_q = s.rolling(window=window_size, min_periods=1).quantile(q/100.0)
-        results[q] = [round(float(v), 2) for v in rolling_q]
+        p = (100 - q) / 100.0
+        # 使用 pandas 的 rolling().quantile，默认插值方式为 linear，等同于 Excel 的 PERCENTILE.INC
+        # min_periods=window_size 确保前期数据不足时不显示
+        rolling_q = s.rolling(window=window_size, min_periods=window_size).quantile(p)
+        # 将 NaN 转换为 None，以便 JSON 序列化为 null
+        results[q] = [round(float(v), 2) if not np.isnan(v) else None for v in rolling_q]
     return results
 
 def find_points(prices, is_high=True, window=120):
@@ -74,11 +82,12 @@ def update_index_calculations(data_obj):
     data_obj["drawdowns"] = [round(float(d), 2) for d in drawdowns]
     data_obj["max_drawdown"] = round(float(np.min(drawdowns)), 2)
     
-    # 2. 计算滚动分位线
+    # 2. 计算滚动分位线 (使用对齐 Excel 的新逻辑)
     q5 = calculate_rolling_quantiles(drawdowns, 5, [50, 70, 90])
     q10 = calculate_rolling_quantiles(drawdowns, 10, [50, 70])
     
-    data_obj["quantile_lines"] = {
+    # 修正 HTML 字段名映射: 网页 JS 查找的是 'percentiles'
+    data_obj["percentiles"] = {
         "滚动五年50%分位": q5[50],
         "滚动五年70%分位": q5[70],
         "滚动五年90%分位": q5[90],
@@ -113,7 +122,6 @@ def update_index_calculations(data_obj):
     intercept_global = intercept_b - slope_b * start_idx
     regression_line = slope_b * np.arange(n_total) + intercept_global
     
-    # 修正字段名映射，确保 HTML 能正确读取
     data_obj["regression"] = [round(float(v), 4) for v in regression_line]
     data_obj["reg_high"] = [round(float(v), 4) for v in reg_high]
     data_obj["reg_low"] = [round(float(v), 4) for v in reg_low]
@@ -147,7 +155,6 @@ def update_html(file_path):
         if recent_data:
             for d_str, price in sorted(recent_data.items(), key=lambda x: x[0]):
                 if d_str in dates:
-                    idx = dates.index(date_str if 'date_str' in locals() else d_str) # 修复潜在变量错误
                     idx = dates.index(d_str)
                     if abs(values[idx] - price) > 0.001:
                         values[idx] = price
@@ -157,10 +164,11 @@ def update_html(file_path):
                     values.append(price)
                     index_updated = True
         
-        # 强制检查：如果派生数据长度与日期长度不符，或者字段缺失，也触发重新计算
-        q_lines = all_data[name].get("quantile_lines", {})
-        q_len = len(next(iter(q_lines.values()))) if q_lines else 0
-        if index_updated or q_len != len(dates) or len(all_data[name].get("reg_high", [])) != len(dates):
+        # 强制检查：如果派生数据长度与日期长度不符，或者字段缺失，触发重新计算
+        p_lines = all_data[name].get("percentiles", {})
+        p_len = len(next(iter(p_lines.values()))) if p_lines else 0
+        
+        if index_updated or p_len != len(dates) or len(all_data[name].get("reg_high", [])) != len(dates):
             combined = sorted(zip(dates, values), key=lambda x: x[0])
             all_data[name]["dates"] = [x[0] for x in combined]
             all_data[name]["values"] = [x[1] for x in combined]
