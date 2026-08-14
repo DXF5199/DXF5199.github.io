@@ -2,9 +2,13 @@ name: 自动更新指数全收益数据
 
 on:
   schedule:
-    # 每个交易日晚上 23:30（北京时间，对应 UTC 15:30）自动运行
+    # 每个交易日 23:30（北京时间；UTC 15:30）运行
     - cron: '30 15 * * 1-5'
-  workflow_dispatch: # 支持手动触发
+  workflow_dispatch:
+
+# 确保自动化任务拥有回写更新后 HTML 的权限。
+permissions:
+  contents: write
 
 jobs:
   update-data:
@@ -18,21 +22,22 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: 安装依赖包
+      - name: 安装计算依赖
         run: |
           python -m pip install --upgrade pip
-          pip install requests akshare pandas numpy scipy
+          python -m pip install requests pandas numpy scipy
 
-      - name: 运行自动化更新脚本
-        run: |
-          python auto_update_indices.py
+      - name: 抓取点位并同步重算指标
+        run: python -u auto_update_indices.py
 
-      - name: 提交并推送更新后的 HTML 文件
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: 提交并推送更新后的网页
         run: |
-          git config --global user.name 'github-actions[bot]'
-          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          if git diff --quiet -- 指数全收益定投策略.html; then
+            echo "没有检测到新的交易日数据或指标变化。"
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
           git add 指数全收益定投策略.html
-          git commit -m "chore: 自动更新每日最新指数全收益点位数据 [skip ci]" || echo "没有检测到数据变化"
+          git commit -m "chore: 自动更新每日全收益指数点位 [skip ci]"
           git push
