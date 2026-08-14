@@ -17,13 +17,46 @@ INDEX_CONFIG = [
     {"code": "480081", "name": "价值100全收益", "source": "CNI"}
 ]
 
-def fetch_csi_history(code):
-    url = f"https://www.csindex.com.cn/csindex-home/perf/index-perf?indexCode={code}"
+def fetch_csi_history(code, last_saved_date):
+    """从中证官网新版历史接口获取最近交易日点位。
+
+    该接口必须带 startDate 与 endDate；缺少这两个参数时会返回
+    ``Parameter Errors`` 或空数据。仅拉取已保存日期前 14 个自然日至今，
+    既能补齐节假日、延迟披露和近期修订，又不会用远端数据覆盖网页历史序列。
+    """
     try:
-        resp = requests.get(url, timeout=20).json()
-        if resp.get("code") == "200" and resp.get("data"):
-            return {item["tradeDate"][:10]: float(item["close"]) for item in resp["data"]}
-    except Exception as e:
+        last_dt = datetime.strptime(last_saved_date, "%Y-%m-%d")
+    except (TypeError, ValueError):
+        last_dt = datetime.now() - timedelta(days=30)
+
+    start_date = (last_dt - timedelta(days=14)).strftime("%Y%m%d")
+    end_date = datetime.now().strftime("%Y%m%d")
+    url = "https://www.csindex.com.cn/csindex-home/perf/index-perf"
+    params = {"indexCode": code, "startDate": start_date, "endDate": end_date}
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Referer": "https://www.csindex.com.cn/"
+    }
+
+    try:
+        response = requests.get(url, params=params, headers=headers, timeout=30)
+        response.raise_for_status()
+        payload = response.json()
+        rows = payload.get("data") or []
+        if payload.get("success") is True and rows:
+            result = {}
+            for item in rows:
+                trade_date = str(item.get("tradeDate", ""))
+                close = item.get("close")
+                if len(trade_date) == 8 and close is not None:
+                    normalized_date = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:8]}"
+                    result[normalized_date] = float(close)
+            if result:
+                latest_date = max(result)
+                print(f"中证 {code}：获取 {len(result)} 条数据，最新 {latest_date} / {result[latest_date]:.2f}")
+                return result
+        print(f"中证 {code}：接口未返回有效数据（code={payload.get('code')}，msg={payload.get('msg')}）。")
+    except (requests.RequestException, ValueError, TypeError) as e:
         print(f"抓取中证指数 {code} 失败: {e}")
     return {}
 
@@ -147,9 +180,13 @@ def update_html(file_path):
         code, name, source = item["code"], item["name"], item["source"]
         if name not in all_data: continue
             
-        recent_data = fetch_csi_history(code) if source == "CSI" else fetch_cni_history(code)
-        
         dates, values = all_data[name]["dates"], all_data[name]["values"]
+        last_saved_date = max(dates) if dates else None
+        recent_data = (
+            fetch_csi_history(code, last_saved_date)
+            if source == "CSI"
+            else fetch_cni_history(code)
+        )
         index_updated = False
         
         if recent_data:
