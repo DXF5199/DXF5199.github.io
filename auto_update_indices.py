@@ -128,40 +128,45 @@ def update_index_calculations(data_obj):
         "滚动十年70%分位": q10[70]
     }
     
-    # 3. 对数回归通道 (近10年)
-    n_10y = min(n_total, 252 * 10)
-    start_idx = n_total - n_10y
-    
+    # 3. 对数回归通道：严格使用“最新交易日向前滚动10个日历年”的样本。
+    # 这样每次新增交易日后，拟合窗口会同步向前滚动，而非固定使用2520个交易日。
+    date_index = pd.to_datetime(data_obj["dates"])
+    cutoff_date = date_index[-1] - pd.DateOffset(years=10)
+    valid_indices = np.flatnonzero(date_index >= cutoff_date)
+    start_idx = int(valid_indices[0]) if len(valid_indices) else 0
     prices_10y = values[start_idx:]
-    high_pts = find_points(prices_10y, is_high=True)
-    low_pts = find_points(prices_10y, is_high=False)
-    high_pts = [(p[0] + start_idx, p[1]) for p in high_pts]
-    low_pts = [(p[0] + start_idx, p[1]) for p in low_pts]
-    
-    def get_line(pts, length):
+    n_10y = len(prices_10y)
+
+    high_pts_local = find_points(prices_10y, is_high=True)
+    low_pts_local = find_points(prices_10y, is_high=False)
+
+    def get_line(pts):
         x = np.array([p[0] for p in pts])
         y = np.array([p[1] for p in pts])
         slope, intercept, _, _, _ = stats.linregress(x, y)
-        line = slope * np.arange(length) + intercept
+        line = slope * np.arange(n_10y) + intercept
         annual_ret = (np.exp(slope * 252) - 1) * 100
-        return line.tolist(), round(float(annual_ret), 2)
+        return line, round(float(annual_ret), 2)
 
-    reg_high, high_ret = get_line(high_pts, n_total)
-    reg_low, low_ret = get_line(low_pts, n_total)
-    
+    reg_high_10y, high_ret = get_line(high_pts_local)
+    reg_low_10y, low_ret = get_line(low_pts_local)
     x_base = np.arange(n_10y)
     y_base = np.log(prices_10y)
     slope_b, intercept_b, _, _, _ = stats.linregress(x_base, y_base)
-    intercept_global = intercept_b - slope_b * start_idx
-    regression_line = slope_b * np.arange(n_total) + intercept_global
-    
-    data_obj["regression"] = [round(float(v), 4) for v in regression_line]
-    data_obj["reg_high"] = [round(float(v), 4) for v in reg_high]
-    data_obj["reg_low"] = [round(float(v), 4) for v in reg_low]
-    data_obj["high_points"] = [[int(p[0]), round(float(p[1]), 4)] for p in high_pts]
-    data_obj["low_points"] = [[int(p[0]), round(float(p[1]), 4)] for p in low_pts]
+    regression_10y = slope_b * x_base + intercept_b
+
+    # 在10年窗口之前填充None，防止旧历史区间出现不属于本轮拟合的通道线。
+    prefix = [None] * start_idx
+    data_obj["regression"] = prefix + [round(float(v), 4) for v in regression_10y]
+    data_obj["reg_high"] = prefix + [round(float(v), 4) for v in reg_high_10y]
+    data_obj["reg_low"] = prefix + [round(float(v), 4) for v in reg_low_10y]
+    data_obj["high_points"] = [[int(p[0] + start_idx), round(float(p[1]), 4)] for p in high_pts_local]
+    data_obj["low_points"] = [[int(p[0] + start_idx), round(float(p[1]), 4)] for p in low_pts_local]
     data_obj["annual_return_high"] = high_ret
     data_obj["annual_return_low"] = low_ret
+    data_obj["regression_start_index"] = start_idx
+    data_obj["regression_start_date"] = data_obj["dates"][start_idx]
+    data_obj["regression_window_years"] = 10
 
 def update_html(file_path):
     print(f"正在处理文件: {file_path}")
@@ -205,7 +210,13 @@ def update_html(file_path):
         p_lines = all_data[name].get("percentiles", {})
         p_len = len(next(iter(p_lines.values()))) if p_lines else 0
         
-        if index_updated or p_len != len(dates) or len(all_data[name].get("reg_high", [])) != len(dates):
+        if (
+            index_updated
+            or p_len != len(dates)
+            or len(all_data[name].get("reg_high", [])) != len(dates)
+            or "regression_start_index" not in all_data[name]
+            or all_data[name].get("regression_window_years") != 10
+        ):
             combined = sorted(zip(dates, values), key=lambda x: x[0])
             all_data[name]["dates"] = [x[0] for x in combined]
             all_data[name]["values"] = [x[1] for x in combined]
