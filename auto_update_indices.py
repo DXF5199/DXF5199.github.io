@@ -16,7 +16,8 @@ INDEX_CONFIG = [
     {"code": "H20269", "name": "红利低波全收益", "source": "CSI"},
     {"code": "H20955", "name": "红利低波100全收益", "source": "CSI"},
     {"code": "932422CNY010", "name": "A500红利低波全收益", "source": "CSI"},
-    {"code": "480081", "name": "价值100全收益", "source": "CNI"}
+    {"code": "480081", "name": "价值100全收益", "source": "CNI"},
+    {"code": "480080", "name": "成长100全收益", "source": "CNI"}
 ]
 
 # 指数 -> 场内 ETF 映射（用于把回撤分位线换算成可交易的价格）
