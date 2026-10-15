@@ -4,7 +4,9 @@ import requests
 import numpy as np
 import pandas as pd
 from scipy import stats
+from bisect import bisect_left
 from datetime import datetime, timedelta
+import time
 import os
 
 # 配置指数代码映射
@@ -16,6 +18,388 @@ INDEX_CONFIG = [
     {"code": "932422CNY010", "name": "A500红利低波全收益", "source": "CSI"},
     {"code": "480081", "name": "价值100全收益", "source": "CNI"}
 ]
+
+# 指数 -> 场内 ETF 映射（用于把回撤分位线换算成可交易的价格）
+# 口径说明：指数为全收益口径，ETF 为价格口径且会现金分红除息，二者长期存在漂移。
+# 这里统一以“最新一期”的比价为基准做等比换算，用于给出当下可参考的价格位置。
+ETF_CONFIG = {
+    "中证红利全收益":     {"code": "515080", "market": "sh", "name": "中证红利ETF招商"},
+    "智选高股息全收益":   {"code": "159207", "market": "sz", "name": "高股息ETF广发"},
+    "红利低波全收益":     {"code": "563020", "market": "sh", "name": "红利低波ETF易方达"},
+    "红利低波100全收益":  {"code": "159307", "market": "sz", "name": "红利低波100ETF博时"},
+    "A500红利低波全收益": {"code": "563510", "market": "sh", "name": "A500红利低波ETF易方达"},
+    "价值100全收益":      {"code": "159263", "market": "sz", "name": "价值ETF易方达"},
+}
+
+# 东方财富 secid 市场前缀：1=沪市，0=深市
+SECID_PREFIX = {"sh": "1", "sz": "0"}
+
+
+def _request_with_retry(url, tries=3, sleep_seconds=1.5, **kwargs):
+    """带重试的 GET：行情接口常被限流短暂返回 403 / Forbidden。"""
+    last_error = None
+    for attempt in range(tries):
+        try:
+            response = requests.get(url, **kwargs)
+            if response.status_code == 200:
+                return response
+            last_error = f"HTTP {response.status_code}"
+        except requests.RequestException as e:
+            last_error = str(e)
+        if attempt < tries - 1:
+            time.sleep(sleep_seconds)
+    raise requests.RequestException(last_error or "请求失败")
+
+
+def fetch_etf_from_eastmoney(code, market):
+    """东方财富行情接口：f43 为最新价，需按 f59 的小数位还原。"""
+    secid = f"{SECID_PREFIX.get(market, '1')}.{code}"
+    url = "https://push2.eastmoney.com/api/qt/stock/get"
+    params = {"secid": secid, "fields": "f43,f57,f58,f59,f60,f86"}
+    try:
+        response = _request_with_retry(
+            url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+        payload = response.json()
+        data = payload.get("data") or {}
+        price, scale = data.get("f43"), data.get("f59")
+        if price is None or scale is None:
+            return {}
+        factor = 10 ** int(scale)
+        quote = {
+            "price": round(float(price) / factor, 4),
+            "name": data.get("f58") or "",
+        }
+        if data.get("f60") is not None:
+            quote["prev_close"] = round(float(data["f60"]) / factor, 4)
+        if data.get("f86"):
+            quote["quote_date"] = datetime.fromtimestamp(int(data["f86"])).strftime("%Y-%m-%d")
+        return quote
+    except (requests.RequestException, ValueError, TypeError, KeyError) as e:
+        print(f"东方财富 ETF {code} 抓取失败: {e}")
+    return {}
+
+
+def fetch_etf_from_sina(code, market):
+    """新浪行情接口，作为东方财富不可用时的备用源。"""
+    url = "https://hq.sinajs.cn/list=" + f"{market}{code}"
+    try:
+        response = _request_with_retry(
+            url,
+            headers={"User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn"},
+            timeout=20,
+        )
+        # 该接口返回 GBK 编码文本：名称,今开,昨收,最新价,最高,最低,...,日期,时间
+        response.encoding = "gbk"
+        body = response.text
+        if '="' not in body:
+            return {}
+        fields = body.split('="')[1].strip('";\n').split(",")
+        if len(fields) < 32:
+            return {}
+        return {
+            "price": float(fields[3]),
+            "prev_close": float(fields[2]),
+            "name": fields[0],
+            "quote_date": fields[30],
+        }
+    except (requests.RequestException, ValueError, IndexError) as e:
+        print(f"新浪 ETF {code} 抓取失败: {e}")
+    return {}
+
+
+def fetch_etf_quotes_batch_sina():
+    """一次性批量抓取全部 ETF 行情。
+
+    逐只请求极易触发新浪的 Forbidden 限流，批量接口只需一次请求即可拿到全部代码。
+    """
+    codes = [meta["code"] for meta in ETF_CONFIG.values()]
+    if not codes:
+        return {}
+    symbols = ",".join(f"{meta['market']}{meta['code']}" for meta in ETF_CONFIG.values())
+    url = "https://hq.sinajs.cn/list=" + symbols
+    quotes = {}
+    try:
+        response = _request_with_retry(
+            url,
+            headers={"User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn"},
+            timeout=20,
+        )
+        response.encoding = "gbk"
+        for line in response.text.strip().split("\n"):
+            matched = re.search(r'hq_str_[a-z]{2}(\d{6})="', line)
+            if not matched or '="' not in line:
+                continue
+            fields = line.split('="')[1].strip('";\n').split(",")
+            if len(fields) < 32:
+                continue
+            try:
+                quotes[matched.group(1)] = {
+                    "price": float(fields[3]),
+                    "prev_close": float(fields[2]),
+                    "name": fields[0],
+                    "quote_date": fields[30],
+                }
+            except (ValueError, IndexError):
+                continue
+    except (requests.RequestException, ValueError) as e:
+        print(f"新浪批量行情抓取失败: {e}")
+        return {}
+
+    missing = [c for c in codes if c not in quotes]
+    print(f"新浪批量行情：获取 {len(quotes)}/{len(codes)} 只 ETF" + (f"，缺失 {','.join(missing)}" if missing else ""))
+    return quotes
+
+
+def fetch_etf_quote(etf_meta, batch_quotes=None):
+    """优先复用批量结果，再按 东方财富 -> 新浪单只 的顺序兜底。"""
+    if batch_quotes and etf_meta["code"] in batch_quotes:
+        return batch_quotes[etf_meta["code"]]
+    for fetcher in (fetch_etf_from_eastmoney, fetch_etf_from_sina):
+        quote = fetcher(etf_meta["code"], etf_meta["market"])
+        if quote.get("price"):
+            return quote
+    return {}
+
+
+def build_etf_block(data_obj, etf_meta, quote):
+    """把各条回撤分位线换算成 ETF 价格。
+
+    指数点位与 ETF 价格近似等比，故先由「现价 /(1+当前回撤)」反推出零回撤
+    （即历史前高）对应的价格，再按分位线自身的回撤幅度折算：
+        price(dd) = peak_price * (1 + dd / 100)
+    """
+    drawdowns = data_obj.get("drawdowns") or []
+    if not drawdowns:
+        return {}
+
+    current_dd = float(drawdowns[-1])
+    price = float(quote["price"])
+    denominator = 1 + current_dd / 100.0
+    if abs(denominator) < 1e-9:
+        return {}
+    peak_price = price / denominator  # 回撤 0% 时的价格，即前高对应价
+
+    levels = {}
+    for p_name, series in (data_obj.get("percentiles") or {}).items():
+        last_q = series[-1] if series else None
+        levels[p_name] = round(peak_price * (1 + float(last_q) / 100.0), 4) if last_q is not None else None
+
+    return {
+        "code": etf_meta["code"],
+        "name": etf_meta.get("name") or quote.get("name") or "",
+        "price": round(price, 4),
+        "prev_close": quote.get("prev_close"),
+        "price_date": quote.get("quote_date"),
+        "index_date": data_obj["dates"][-1] if data_obj.get("dates") else None,
+        "current_drawdown": round(current_dd, 2),
+        "peak_price": round(peak_price, 4),
+        "levels": levels,
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+def _parse_pct(raw):
+    """把 '5.96%' 这类文本转成浮点数；'---' 或空值返回 None。"""
+    if raw is None:
+        return None
+    text = str(raw).strip().replace("%", "").replace(",", "")
+    if text in ("", "---", "--", "-"):
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def fetch_fund_period_returns(code):
+    """抓取天天基金「阶段涨幅」，返回 {阶段名: 收益率(%)}。"""
+    url = "https://fundf10.eastmoney.com/FundArchivesDatas.aspx"
+    params = {"type": "jdzf", "code": code, "to": "", "per": "1", "sdate": "", "edate": ""}
+    headers = dict(FUND_F10_HEADERS, Referer=f"https://fundf10.eastmoney.com/jdzf_{code}.html")
+    result = {}
+    try:
+        response = requests.get(url, params=params, headers=headers, timeout=25)
+        response.encoding = "utf-8"
+        for block in re.findall(r"<ul>(.*?)</ul>", response.text, re.S):
+            title = re.search(r"class='title'>([^<]*)<", block)
+            values = re.findall(r"<li class='tor[^']*'>([^<]*)<", block)
+            if not title or not values:
+                continue
+            pct = _parse_pct(values[0])  # 第一个数值列即“涨幅”
+            if pct is not None:
+                result[title.group(1).strip()] = pct
+    except (requests.RequestException, ValueError, TypeError) as e:
+        print(f"抓取基金 {code} 阶段涨幅失败: {e}")
+    return result
+
+
+def fetch_fund_year_returns(code):
+    """抓取天天基金「年度涨幅」，返回 {年份字符串: 收益率(%)}。"""
+    url = "https://fundf10.eastmoney.com/FundArchivesDatas.aspx"
+    params = {"type": "yearzf", "code": code, "to": "", "per": "1", "sdate": "", "edate": ""}
+    headers = dict(FUND_F10_HEADERS, Referer=f"https://fundf10.eastmoney.com/jdzf_{code}.html")
+    result = {}
+    try:
+        response = requests.get(url, params=params, headers=headers, timeout=25)
+        response.encoding = "utf-8"
+        text = response.text
+        year_headers = re.findall(r"<th>(\d{4})年度</th>", text)
+        values_row = []
+        for tr in re.findall(r"<tr>(.*?)</tr>", text, re.S):
+            cells = [re.sub(r"<[^>]+>", "", x).strip() for x in re.findall(r"<td[^>]*>(.*?)</td>", tr, re.S)]
+            if cells and cells[0] == "阶段涨幅":
+                values_row = cells[1:]
+                break
+        for year, raw in zip(year_headers, values_row):
+            pct = _parse_pct(raw)
+            if pct is not None:
+                result[year] = pct
+    except (requests.RequestException, ValueError, TypeError) as e:
+        print(f"抓取基金 {code} 年度涨幅失败: {e}")
+    return result
+
+
+def compute_index_returns(data_obj):
+    """用页面内的全收益指数日序列，算出与天天基金同口径的收益。
+
+    年度收益 = 该年最后一个交易日点位 / 上一年最后一个交易日点位 - 1；
+    今年来   = 最新点位 / 上一年最后一个交易日点位 - 1；
+    近 N 年  = 最新点位 / N 年前同日（或其之前最后一个交易日）点位 - 1。
+    """
+    dates = data_obj.get("dates") or []
+    values = data_obj.get("values") or []
+    if len(dates) < 2 or len(values) < 2:
+        return {"periods": {}, "years": []}
+
+    def value_at_or_before(target_date):
+        idx = bisect_left(dates, target_date)
+        if idx < len(dates) and dates[idx] == target_date:
+            return values[idx]
+        return values[idx - 1] if idx > 0 else None
+
+    def pct_return(start_value):
+        if not start_value:
+            return None
+        return round((values[-1] / start_value - 1) * 100, 2)
+
+    last_date = datetime.strptime(dates[-1], "%Y-%m-%d")
+
+    periods = {"今年来": pct_return(value_at_or_before(f"{last_date.year - 1}-12-31"))}
+    for label, years in (("近1年", 1), ("近3年", 3), ("近5年", 5)):
+        try:
+            anchor = last_date.replace(year=last_date.year - years)
+        except ValueError:  # 2 月 29 日
+            anchor = last_date.replace(year=last_date.year - years, day=28)
+        periods[label] = pct_return(value_at_or_before(anchor.strftime("%Y-%m-%d")))
+
+    years_out = []
+    for y in range(last_date.year - 1, last_date.year - 1 - TRACKING_YEARS, -1):
+        start = value_at_or_before(f"{y - 1}-12-31")
+        end = value_at_or_before(f"{y}-12-31")
+        if start and end:
+            years_out.append({"year": y, "value": round((end / start - 1) * 100, 2)})
+
+    return {"periods": periods, "years": years_out}
+
+
+def fetch_fund_inception(code):
+    """从天天基金净值序列取首个净值日（近似成立日）。
+
+    天天基金的“阶段涨幅”对存续不足的基金会给出不可靠数值（例如成立 1.5 年的基金
+    也会列出近3年、近5年涨幅），因此需要用真实存续长度来过滤可对比的阶段。
+    """
+    url = f"https://fund.eastmoney.com/pingzhongdata/{code}.js"
+    try:
+        response = requests.get(url, headers=FUND_F10_HEADERS, timeout=25)
+        response.encoding = "utf-8"
+        match = re.search(r"Data_ACWorthTrend\s*=\s*(\[.*?\]);", response.text, re.S)
+        if not match:
+            return None
+        series = json.loads(match.group(1))
+        if not series:
+            return None
+        return datetime.fromtimestamp(series[0][0] / 1000).strftime("%Y-%m-%d")
+    except (requests.RequestException, ValueError, TypeError) as e:
+        print(f"获取基金 {code} 成立日失败: {e}")
+        return None
+
+
+def build_tracking_block(data_obj, etf_meta):
+    """组装「ETF 收益 vs 全收益指数收益」的阶段与年度对比数据。
+
+    差值 = 基金收益 - 指数收益，通常为小幅负值，主要来自管理费、托管费与跟踪误差。
+    """
+    code = etf_meta["code"]
+    index_returns = compute_index_returns(data_obj)
+    fund_periods = fetch_fund_period_returns(code)
+    fund_years = fetch_fund_year_returns(code)
+    inception = fetch_fund_inception(code)
+
+    # 基金真实存续年数：用于剔除天天基金给出的、超出其历史的阶段涨幅
+    last_date_str = data_obj.get("dates")[-1] if data_obj.get("dates") else None
+    fund_age_years = None
+    if inception and last_date_str:
+        fund_age_years = (datetime.strptime(last_date_str, "%Y-%m-%d")
+                          - datetime.strptime(inception, "%Y-%m-%d")).days / 365.25
+
+    periods = []
+    for label, need_years in TRACKING_PERIODS:
+        if fund_age_years is not None and need_years and fund_age_years < need_years:
+            continue  # 存续不足，该阶段不可比
+        fund_value = fund_periods.get(label)
+        index_value = index_returns["periods"].get(label)
+        if fund_value is None or index_value is None:
+            continue
+        periods.append({
+            "period": label,
+            "fund": fund_value,
+            "index": index_value,
+            "diff": round(fund_value - index_value, 2),
+        })
+
+    # 年度对比只保留基金有完整披露的年份，避免出现整列无数据的空行
+    years = []
+    for item in index_returns["years"]:
+        fund_value = fund_years.get(str(item["year"]))
+        if fund_value is None:
+            continue
+        index_value = item["value"]
+        years.append({
+            "year": item["year"],
+            "fund": fund_value,
+            "index": index_value,
+            "diff": round(fund_value - index_value, 2),
+        })
+
+    if not periods and not years:
+        return {}
+
+    skipped = [lbl for lbl, need in TRACKING_PERIODS
+               if need and fund_age_years is not None and fund_age_years < need]
+
+    return {
+        "fund_code": code,
+        "fund_name": etf_meta.get("name", ""),
+        "inception": inception,
+        "source": "天天基金",
+        "source_url": f"http://fundf10.eastmoney.com/jdzf_{code}.html",
+        "periods": periods,
+        "years": years,
+        "skipped_periods": skipped,
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+# 天天基金收益口径：阶段涨幅 + 年度涨幅（均为含分红再投资的复权收益，可与全收益指数直接比较）
+FUND_F10_HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Referer": "https://fundf10.eastmoney.com/",
+}
+# 与天天基金“阶段涨幅”对齐的对比口径；数值为该阶段所需的存续年数
+TRACKING_PERIODS = [("今年来", 0), ("近1年", 1), ("近3年", 3), ("近5年", 5)]
+# 年度对比：最近 5 个完整自然年
+TRACKING_YEARS = 5
+
 
 def fetch_csi_history(code, last_saved_date):
     """从中证官网新版历史接口获取最近交易日点位。
@@ -180,6 +564,8 @@ def update_html(file_path):
     
     all_data = json.loads(match.group(1))
     updated_any = False
+    # 先批量取一次全部 ETF 行情，避免逐只请求被限流
+    batch_quotes = fetch_etf_quotes_batch_sina()
 
     for item in INDEX_CONFIG:
         code, name, source = item["code"], item["name"], item["source"]
@@ -224,6 +610,54 @@ def update_html(file_path):
             print(f"正在为 {name} 重新计算所有图表指标...")
             update_index_calculations(all_data[name])
             updated_any = True
+
+        # 同步对应 ETF 的最新收盘价，并重算「各回撤分位线 -> ETF 价格」的换算结果
+        etf_meta = ETF_CONFIG.get(name)
+        if etf_meta:
+            quote = fetch_etf_quote(etf_meta, batch_quotes)
+            if quote.get("price"):
+                block = build_etf_block(all_data[name], etf_meta, quote)
+                previous = all_data[name].get("etf") or {}
+                # 仅在价格/日期/分位线换算结果变化时写回，避免每日空跑产生无意义的提交
+                if block and (
+                    previous.get("price") != block.get("price")
+                    or previous.get("price_date") != block.get("price_date")
+                    or previous.get("levels") != block.get("levels")
+                    or previous.get("current_drawdown") != block.get("current_drawdown")
+                ):
+                    all_data[name]["etf"] = block
+                    updated_any = True
+                    print(
+                        f"{name} ↔ {etf_meta['code']} 现价 {block['price']}"
+                        f"（{block.get('price_date')}）：分位线对应价格已同步"
+                    )
+            else:
+                print(f"⚠️ {name} 对应 ETF {etf_meta['code']} 行情抓取失败，保留上一次价格。")
+
+            # 同步「ETF 收益 vs 全收益指数收益」的跟踪对比数据（来源：天天基金）
+            try:
+                tracking = build_tracking_block(all_data[name], etf_meta)
+            except Exception as e:  # 第三方页面结构变化不应中断整体更新
+                print(f"⚠️ {name} 跟踪对比数据计算失败: {e}")
+                tracking = {}
+            # 仅比较实质字段，忽略每次运行都会变化的 updated_at，避免每日空跑产生无意义提交
+            previous_tracking = all_data[name].get("tracking") or {}
+            if tracking and (
+                previous_tracking.get("periods") != tracking.get("periods")
+                or previous_tracking.get("years") != tracking.get("years")
+                or previous_tracking.get("inception") != tracking.get("inception")
+                or previous_tracking.get("skipped_periods") != tracking.get("skipped_periods")
+            ):
+                all_data[name]["tracking"] = tracking
+                updated_any = True
+                hit = [p for p in tracking["periods"] if p["diff"] is not None]
+                latest_year = tracking["years"][0] if tracking["years"] else None
+                extra = (
+                    f"｜{latest_year['year']}年 基金 {latest_year['fund']}% vs 指数 {latest_year['index']}%"
+                    if latest_year and latest_year["fund"] is not None
+                    else ""
+                )
+                print(f"{name} 跟踪数据已同步（{len(hit)} 个阶段 / {len(tracking['years'])} 个年度）{extra}")
 
     if updated_any:
         new_json = json.dumps(all_data, ensure_ascii=False)
