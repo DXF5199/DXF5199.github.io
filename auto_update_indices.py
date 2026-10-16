@@ -606,6 +606,20 @@ def update_index_calculations(data_obj):
     trough_idx = int(np.argmin(win_drawdowns))            # 窗口内最低点
     peak_idx = int(np.argmax(win_prices[:trough_idx + 1]))  # 该低点之前的最高点
     data_obj["max_drawdown_days"] = int(trough_idx - peak_idx)
+
+    # 最大修复天数：近 10 年内，从「回撤最低点」涨回「前高」所经历的最长交易日数。
+    # 与上一项配对看：一次完整的峰谷循环 ≈ 最大回撤天数（峰→谷）+ 修复天数（谷→突破前高）。
+    repair_spans = []
+    repair_peak = 0
+    for i in range(1, len(win_prices)):
+        if win_prices[i] >= win_prices[repair_peak]:
+            if i - repair_peak > 1:            # 中间确有回撤才算一轮修复
+                segment = win_prices[repair_peak + 1: i]
+                trough_i = repair_peak + 1 + int(np.argmin(segment))
+                repair_spans.append(i - trough_i)
+            repair_peak = i
+    data_obj["max_repair_days"] = int(max(repair_spans)) if repair_spans else 0
+
     data_obj.pop("max_recovery_days", None)   # 旧口径字段已废弃
     data_obj.pop("avg_recovery_days", None)
     # 已回撤天数：从最近一次刷新历史新高，到最新交易日
@@ -1107,6 +1121,7 @@ def update_html(file_path):
             or "regression_start_index" not in all_data[name]
             or all_data[name].get("regression_window_years") != 10
             or "max_drawdown_days" not in all_data[name]
+            or "max_repair_days" not in all_data[name]
             or "current_drawdown_days" not in all_data[name]
         ):
             combined = sorted(zip(dates, values), key=lambda x: x[0])
