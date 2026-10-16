@@ -8,6 +8,7 @@ from bisect import bisect_left
 from datetime import datetime, timedelta
 import time
 import os
+import tempfile
 
 # 配置指数代码映射
 INDEX_CONFIG = [
@@ -31,6 +32,99 @@ ETF_CONFIG = {
     "A500红利低波全收益": {"code": "563510", "market": "sh", "name": "A500红利低波ETF易方达"},
     "价值100全收益":      {"code": "159263", "market": "sz", "name": "价值ETF易方达"},
 }
+
+# 指数估值（成分股权重加权）
+# 值为 (价格指数代码, 数据来源)：CSI=中证指数官网、CNI=国证指数官网。
+# 权重来源都是指数公司公开文件（中证为月度、国证为每日），个股行情每日实时，
+# 因此估值数据每个交易日都会刷新。
+VALUATION_CONFIG = {
+    "中证红利全收益": ("000922", "CSI"),
+    "智选高股息全收益": ("932305", "CSI"),
+    "红利低波全收益": ("H30269", "CSI"),
+    "红利低波100全收益": ("930955", "CSI"),
+    "A500红利低波全收益": ("932422", "CSI"),
+    "价值100全收益": ("480081", "CNI"),
+    "成长100全收益": ("480080", "CNI"),
+}
+
+CSI_WEIGHT_URL = (
+    "https://oss-ch.csindex.com.cn/static/html/csindex/public/uploads/"
+    "file/autofile/closeweight/{code}closeweight.xls"
+)
+TENCENT_QUOTE_URL = "https://qt.gtimg.cn/q={symbols}"
+TENCENT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Referer": "https://gu.qq.com/",
+}
+# 腾讯行情字段下标
+TENCENT_FIELD_PE = 39    # 市盈率(TTM)
+TENCENT_FIELD_PB = 46    # 市净率
+TENCENT_FIELD_DY = 64    # 股息率(%)
+TENCENT_FIELD_TIME = 30  # 行情时间戳 YYYYMMDDHHMMSS
+TENCENT_FIELD_MARKET_CAP = 45  # 总市值(亿元)
+
+# 国证指数官网：样本权重下载接口（完整成分股权重，每日更新）
+CNI_WEIGHT_URL = (
+    "https://www.cnindex.com.cn/sample-detail/download-history?indexcode={code}"
+)
+CNI_HEADERS = {
+    "User-Agent": TENCENT_HEADERS["User-Agent"],
+    "Referer": "https://www.cnindex.com.cn/module/index-detail.html",
+}
+
+# 中证指数官网：行业权重分布接口（cicsType = 1/2/3/4 对应一/二/三/四级行业）
+CSI_INDUSTRY_URL = (
+    "https://www.csindex.com.cn/csindex-home/index/weight/"
+    "industry-weight-two-new/{code}?cicsType={level}"
+)
+# 中证一级行业权重（部分新指数只发布到一级）
+CSI_INDUSTRY_L1_URL = (
+    "https://www.csindex.com.cn/csindex-home/index/weight/industry-weight/{code}"
+)
+CSI_HEADERS = {
+    "User-Agent": TENCENT_HEADERS["User-Agent"],
+    "Referer": "https://www.csindex.com.cn/",
+}
+# 行业分类层级：2 = 中证二级行业
+INDUSTRY_LEVEL = 2
+INDUSTRY_LEVEL_NAME = {1: "一", 2: "二", 3: "三", 4: "四"}
+
+# 申万行业分布（红色火箭）：成分股接口一次返回全部成分股的
+# 权重 + 申万一/二/三/四级行业名，按权重聚合成行业分布。
+# 注意国证指数用 98 前缀（价值100 = 980081、成长100 = 980080），
+# 与国证官网的 48 前缀不同。
+REDROCKET_COMPONENT_URL = (
+    "https://www.hongsehuojian.com/fundex-quote/security/component/"
+    "componentStock?securityCode={code}&isAll=1"
+)
+REDROCKET_CODES = {
+    "中证红利全收益": "000922.CSI",
+    "智选高股息全收益": "932305.CSI",
+    "红利低波全收益": "h30269.CSI",
+    "红利低波100全收益": "930955.CSI",
+    "A500红利低波全收益": "932422.CSI",
+    "价值100全收益": "980081.CNI",
+    "成长100全收益": "980080.CNI",
+}
+REDROCKET_HEADERS = {
+    "User-Agent": TENCENT_HEADERS["User-Agent"],
+    "Referer": "https://www.hongsehuojian.com/red-rocket/indexDetail",
+}
+# 申万行业层级：(内部键, 展示名, 接口字段名)
+SW_INDUSTRY_LEVELS = [
+    ("L1", "申万一级", "industriesNameOfLevelOne"),
+    ("L2", "申万二级", "industriesNameOfLevelTwo"),
+]
+
+# 成分股总市值分档（单位：亿元）——(名称, 下限, 上限)，上限为 None 表示不封顶
+MARKET_CAP_BUCKETS = [
+    ("大盘股", 500, None),
+    ("中盘股", 100, 500),
+    ("小盘股", None, 100),
+]
 
 # 东方财富 secid 市场前缀：1=沪市，0=深市
 SECID_PREFIX = {"sh": "1", "sz": "0"}
@@ -499,6 +593,26 @@ def update_index_calculations(data_obj):
     drawdowns = (prices / max_prices - 1) * 100
     data_obj["drawdowns"] = [round(float(d), 2) for d in drawdowns]
     data_obj["max_drawdown"] = round(float(np.min(drawdowns)), 2)
+
+    # 1.1 回撤时长（单位：交易日）
+    # 最大回撤天数：近 10 年内，从「最高点」回撤到「最低点」所经历的交易日数。
+    # 取窗口内跌幅最深的那一段（即最大回撤对应的峰谷），2015 那种极端行情因超出窗口而自动排除。
+    date_series = pd.to_datetime(data_obj["dates"])
+    win_cutoff = date_series[-1] - pd.DateOffset(years=10)
+    win_start = int(np.flatnonzero(date_series >= win_cutoff)[0]) if len(date_series) else 0
+    win_prices = prices[win_start:]
+    win_running_max = np.maximum.accumulate(win_prices)
+    win_drawdowns = (win_prices / win_running_max - 1) * 100
+    trough_idx = int(np.argmin(win_drawdowns))            # 窗口内最低点
+    peak_idx = int(np.argmax(win_prices[:trough_idx + 1]))  # 该低点之前的最高点
+    data_obj["max_drawdown_days"] = int(trough_idx - peak_idx)
+    data_obj.pop("max_recovery_days", None)   # 旧口径字段已废弃
+    data_obj.pop("avg_recovery_days", None)
+    # 已回撤天数：从最近一次刷新历史新高，到最新交易日
+    running_max = np.maximum.accumulate(prices)
+    fresh_highs = np.flatnonzero(prices >= running_max)
+    last_peak_idx = int(fresh_highs[-1]) if len(fresh_highs) else 0
+    data_obj["current_drawdown_days"] = int(n_total - 1 - last_peak_idx)
     
     # 2. 计算滚动分位线 (使用对齐 Excel 的新逻辑)
     q5 = calculate_rolling_quantiles(drawdowns, 5, [50, 70, 90])
@@ -553,6 +667,395 @@ def update_index_calculations(data_obj):
     data_obj["regression_start_date"] = data_obj["dates"][start_idx]
     data_obj["regression_window_years"] = 10
 
+def _normalize_date(raw):
+    """把 20260930 / 2026-09-30 统一成 YYYY-MM-DD。"""
+    text = str(raw).strip()
+    if len(text) == 8 and text.isdigit():
+        return f"{text[:4]}-{text[4:6]}-{text[6:]}"
+    return text
+
+
+def _to_positive_float(raw):
+    """把行情字段转成正浮点数，无效值（空、横杠、负值）返回 None。"""
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def fetch_csi_weights(code):
+    """下载并解析中证指数成分股权重，返回 ([(symbol, 名称, 权重%)], 权重日期)。"""
+    response = _request_with_retry(
+        CSI_WEIGHT_URL.format(code=code), headers=TENCENT_HEADERS, timeout=30)
+    tmp_path = os.path.join(tempfile.gettempdir(), f"closeweight_{code}.xls")
+    with open(tmp_path, "wb") as handle:
+        handle.write(response.content)
+
+    frame = pd.read_excel(tmp_path, header=0)
+    columns = list(frame.columns)
+    col_code = next(c for c in columns if "成份券代码" in c)
+    col_exchange = next(c for c in columns if c.startswith("交易所"))
+    col_weight = next(c for c in columns if "权重" in c)
+    col_name = next(c for c in columns if "成份券名称" in c)
+    col_date = next(c for c in columns if "日期" in c)
+
+    rows = []
+    for _, row in frame.iterrows():
+        raw_code = str(row[col_code]).split(".")[0].zfill(6)
+        if "上海" in str(row[col_exchange]):
+            exchange = "sh"
+        elif "深圳" in str(row[col_exchange]):
+            exchange = "sz"
+        else:
+            exchange = "bj"
+        # 第 4 位留给行业：中证指数用官网 CICS 接口取，此处不填
+        rows.append((
+            exchange + raw_code,
+            str(row[col_name]),
+            float(row[col_weight]),
+            None,
+        ))
+    return rows, _normalize_date(str(frame.iloc[0][col_date]))
+
+
+def _guess_market(code):
+    """国证的样本代码不带交易所前缀，按代码段推断所属市场。"""
+    if code[0] in "69":
+        return "sh"
+    if code[0] in "023":
+        return "sz"
+    if code[0] in "48":
+        return "bj"
+    return "sh"
+
+
+def fetch_cni_weights(code):
+    """下载国证指数成分股权重（样本权重 Excel），返回 ([(symbol, 名称, 权重%)], 权重日期)。"""
+    response = _request_with_retry(
+        CNI_WEIGHT_URL.format(code=code), headers=CNI_HEADERS, timeout=30)
+    tmp_path = os.path.join(tempfile.gettempdir(), f"cni_sample_{code}.xls")
+    with open(tmp_path, "wb") as handle:
+        handle.write(response.content)
+
+    frame = pd.read_excel(tmp_path, header=0)
+    columns = list(frame.columns)
+    col_code = next(c for c in columns if "样本代码" in c)
+    col_weight = next(c for c in columns if "权重" in c)
+    col_name = next(c for c in columns if "样本简称" in c)
+    col_date = next(c for c in columns if "日期" in c)
+    # 国证样本权重文件自带行业列（国证行业分类），作为其行业分布来源
+    col_industry = next((c for c in columns if "行业" in str(c)), None)
+
+    rows = []
+    for _, row in frame.iterrows():
+        raw_code = str(row[col_code]).split(".")[0].strip().zfill(6)
+        weight = _to_positive_float(row[col_weight])
+        if not raw_code.strip("0") or weight is None:
+            continue
+        industry = str(row[col_industry]).strip() if col_industry else None
+        rows.append((
+            _guess_market(raw_code) + raw_code,
+            str(row[col_name]),
+            weight,
+            industry or None,
+        ))
+    return rows, _normalize_date(str(frame.iloc[0][col_date]))
+
+
+def fetch_stock_quotes(symbols, batch_size=50):
+    """批量抓取个股行情（腾讯），返回 {symbol: 字段列表}。"""
+    quotes = {}
+    for start in range(0, len(symbols), batch_size):
+        batch = symbols[start:start + batch_size]
+        response = _request_with_retry(
+            TENCENT_QUOTE_URL.format(symbols=",".join(batch)),
+            headers=TENCENT_HEADERS, timeout=25)
+        response.encoding = "gbk"
+        for line in response.text.strip().split("\n"):
+            matched = re.match(r'v_([a-z]{2}\d{6})="', line)
+            if not matched:
+                continue
+            fields = line.split('="', 1)[1].rsplit('"', 1)[0].split("~")
+            if len(fields) > TENCENT_FIELD_DY:
+                quotes[matched.group(1)] = fields
+        time.sleep(0.3)
+    return quotes
+
+
+def _parse_industry_rows(data, name_key):
+    """把接口返回的行业权重列表整理成 [{name, weight}]（降序）。"""
+    items = []
+    for row in (data or {}).get("industryWeightList") or []:
+        weight = _to_positive_float(row.get("weightPct"))
+        name = str(row.get(name_key, "")).strip()
+        if weight is None or not name:
+            continue
+        items.append({"name": name, "weight": round(weight, 2)})
+    items.sort(key=lambda x: -x["weight"])
+    return items
+
+
+def fetch_csi_industry(code, level=INDUSTRY_LEVEL):
+    """抓取中证指数行业权重，返回 (items, 日期, 分类名称)。
+
+    优先取配置的层级（默认二级）；部分较新的指数只发布一级行业
+    （二级接口返回 null），此时自动回退到一级，避免该指数行业分布空白。
+    """
+    payload = _request_with_retry(
+        CSI_INDUSTRY_URL.format(code=code, level=level),
+        headers=CSI_HEADERS, timeout=25).json()
+    data = (payload.get("data") or {}) if payload.get("success") else {}
+    items = _parse_industry_rows(data, "csiType")
+    if items:
+        level_name = INDUSTRY_LEVEL_NAME.get(level, "")
+        return (items, _normalize_date(data.get("updateDate") or ""),
+                f"中证行业分类(CICS){level_name}级")
+
+    # 回退：一级行业
+    payload = _request_with_retry(
+        CSI_INDUSTRY_L1_URL.format(code=code),
+        headers=CSI_HEADERS, timeout=25).json()
+    data = (payload.get("data") or {}) if payload.get("success") else {}
+    items = _parse_industry_rows(data, "csiTypeL1")
+    if items:
+        return items, _normalize_date(data.get("updateDate") or ""), "中证行业分类(CICS)一级"
+    return [], "", ""
+
+
+def fetch_sw_industries(name):
+    """从红色火箭抓取成分股，按权重聚合申万一级/二级行业分布。
+
+    返回 {"source", "date", "levels": {"L1": {"label", "items"}, "L2": {...}}}；
+    未配置该指数或抓取失败时返回 {}（由调用方回退到官网分类）。
+    """
+    code = REDROCKET_CODES.get(name)
+    if not code:
+        return {}
+    try:
+        payload = _request_with_retry(
+            REDROCKET_COMPONENT_URL.format(code=code),
+            headers=REDROCKET_HEADERS, timeout=30).json()
+    except Exception as e:
+        print(f"⚠️ {name} 申万行业抓取失败: {e}")
+        return {}
+    if str(payload.get("code")) != "200":
+        return {}
+    data = payload.get("data") or {}
+    rows = data.get("componentStockListVos") or []
+    if not rows:
+        return {}
+
+    levels = {}
+    for key, label, field in SW_INDUSTRY_LEVELS:
+        agg = {}
+        for row in rows:
+            industry = str(row.get(field) or "").strip()
+            weight = _to_positive_float(row.get("weight"))
+            if not industry or weight is None:
+                continue
+            agg[industry] = agg.get(industry, 0.0) + weight
+        if not agg:
+            continue
+        items = [{"name": k, "weight": round(v, 2)} for k, v in agg.items()]
+        items.sort(key=lambda x: -x["weight"])
+        levels[key] = {"label": label, "items": items}
+    if not levels:
+        return {}
+
+    matched = re.search(r"(\d{4}-\d{2}-\d{2})", str(data.get("showUpdateStr") or ""))
+    return {
+        "source": "申万宏源·红色火箭",
+        "date": matched.group(1) if matched else "",
+        "levels": levels,
+    }
+
+
+def build_industry_block(rows, code, source, weight_date, name=None):
+    """行业权重分布。
+
+    优先用红色火箭的申万一级/二级（覆盖全部 7 个指数、含各成分股行业名）；
+    抓取失败时回退到指数公司官网分类（中证 CICS / 国证行业分类）。
+    """
+    sw = fetch_sw_industries(name) if name else {}
+    if sw:
+        default_level = "L2" if "L2" in sw["levels"] else next(iter(sw["levels"]))
+        return {
+            "items": sw["levels"][default_level]["items"],   # 兼容单层级渲染
+            "levels": sw["levels"],
+            "default_level": default_level,
+            "standard": sw["levels"][default_level]["label"],
+            "date": sw["date"] or weight_date,
+            "source": sw["source"],
+        }
+    if source == "CSI":
+        items, date, standard = fetch_csi_industry(code)
+        if not items:
+            return {}
+        return {
+            "items": items,
+            "date": date or weight_date,
+            "standard": standard,
+            "source": "中证指数官网",
+        }
+    # 国证：按权重文件里的行业列聚合权重
+    agg = {}
+    for row in rows:
+        industry = row[3] if len(row) > 3 else None
+        if not industry:
+            continue
+        agg[industry] = agg.get(industry, 0.0) + row[2]
+    if not agg:
+        return {}
+    items = [{"name": k, "weight": round(v, 2)} for k, v in agg.items()]
+    items.sort(key=lambda x: -x["weight"])
+    return {
+        "items": items,
+        "date": weight_date,
+        "standard": "国证行业分类",
+        "source": "国证指数官网",
+    }
+
+
+def build_market_cap_block(rows, quotes):
+    """按成分股总市值分档统计（大盘/中盘/小盘），复用已抓取的行情。"""
+    caps = []
+    for row in rows:
+        symbol, weight = row[0], row[2]
+        fields = quotes.get(symbol)
+        if not fields or len(fields) <= TENCENT_FIELD_MARKET_CAP:
+            continue
+        cap = _to_positive_float(fields[TENCENT_FIELD_MARKET_CAP])
+        if cap is None:
+            continue
+        caps.append((cap, weight))
+    if not caps:
+        return {}
+    total = sum(c for c, _ in caps)
+    buckets = []
+    for label, low, high in MARKET_CAP_BUCKETS:
+        picked = [
+            (c, w) for c, w in caps
+            if (low is None or c >= low) and (high is None or c < high)
+        ]
+        buckets.append({
+            "name": label,
+            "count": len(picked),
+            "weight": round(sum(w for _, w in picked), 2),
+        })
+    return {
+        "total": round(total, 2),              # 成分股合计总市值（亿元）
+        "average": round(total / len(caps), 2),  # 平均市值（亿元）
+        "count": len(caps),
+        "buckets": buckets,
+    }
+
+
+def build_valuation_block(code, source="CSI"):
+    """按成分股权重加权计算指数的 PE-TTM / PB / 加权股息率。
+
+    股息率是市值的线性函数，用算术加权；
+    PE / PB 是「总量之比」，必须用调和加权 1/Σ(w/值)，否则会系统性高估。
+    """
+    rows, weight_date = (
+        fetch_cni_weights(code) if source == "CNI" else fetch_csi_weights(code)
+    )
+    quotes = fetch_stock_quotes([row[0] for row in rows])
+
+    total_weight = 0.0
+    sum_dividend = 0.0
+    inv_pe = 0.0
+    inv_pb = 0.0
+    valid = 0
+    quote_dates = []
+    for symbol, _name, weight, *_rest in rows:
+        fields = quotes.get(symbol)
+        if not fields:
+            continue
+        # 记录行情所属交易日（各成分股取最新），即估值数据的实际日期
+        raw_time = fields[TENCENT_FIELD_TIME] if len(fields) > TENCENT_FIELD_TIME else ""
+        if len(raw_time) >= 8 and raw_time[:8].isdigit():
+            quote_dates.append(raw_time[:8])
+        pe = _to_positive_float(fields[TENCENT_FIELD_PE])
+        pb = _to_positive_float(fields[TENCENT_FIELD_PB])
+        dividend = _to_positive_float(fields[TENCENT_FIELD_DY])
+        if pe is None or pb is None or dividend is None:
+            continue
+        total_weight += weight
+        sum_dividend += weight * dividend
+        inv_pe += weight / pe
+        inv_pb += weight / pb
+        valid += 1
+
+    if not total_weight:
+        return {}
+
+    return {
+        "pe_ttm": round(total_weight / inv_pe, 2) if inv_pe else None,
+        "pb": round(total_weight / inv_pb, 2) if inv_pb else None,
+        "dividend_yield": round(sum_dividend / total_weight, 2),
+        "weight_date": weight_date,
+        # 个股行情所属交易日：估值数据本身的日期
+        "data_date": _normalize_date(max(quote_dates)) if quote_dates else weight_date,
+        "source": "中证指数官网" if source == "CSI" else "国证指数官网",
+        "component_count": len(rows),
+        "valid_count": valid,
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+def fetch_index_metrics():
+    """计算全部已配置指数的估值 / 市值分布 / 行业分布，返回 {指数名: {...}}。"""
+    result = {}
+    for name, (code, source) in VALUATION_CONFIG.items():
+        try:
+            block = build_valuation_block(code, source)
+        except Exception as e:  # 第三方文件结构变化不应中断整体更新
+            print(f"⚠️ {name} 估值数据计算失败: {e}")
+            continue
+        if not block:
+            continue
+
+        # 复用同一批成分股行情算市值分布（不额外发请求）
+        market_cap = {}
+        industry = {}
+        try:
+            rows, weight_date = (
+                fetch_cni_weights(code) if source == "CNI" else fetch_csi_weights(code)
+            )
+            quotes = fetch_stock_quotes([row[0] for row in rows])
+            market_cap = build_market_cap_block(rows, quotes)
+            industry = build_industry_block(rows, code, source, weight_date, name)
+        except Exception as e:
+            print(f"⚠️ {name} 画像数据计算失败: {e}")
+
+        result[name] = {"valuation": block, "market_cap": market_cap, "industry": industry}
+        print(
+            f"{name} 估值：PE-TTM {block['pe_ttm']}｜PB {block['pb']}"
+            f"｜加权股息率 {block['dividend_yield']}%"
+            f"（权重日 {block['weight_date']}，"
+            f"{block['valid_count']}/{block['component_count']} 只有效）"
+        )
+        if market_cap:
+            bucket_text = " / ".join(
+                f"{b['name']} {b['count']}只" for b in market_cap["buckets"]
+            )
+            print(f"    市值分布：合计 {market_cap['total']/10000:.2f} 万亿｜"
+                  f"平均 {market_cap['average']:.2f} 亿｜{bucket_text}")
+        if industry:
+            level_keys = list((industry.get("levels") or {}).keys())
+            extra = ""
+            if level_keys:
+                counts = " / ".join(
+                    f"{industry['levels'][k]['label']} {len(industry['levels'][k]['items'])} 个"
+                    for k in level_keys)
+                extra = f"［{counts}］"
+            print(f"    行业分布：{industry['standard']}{extra}，"
+                  f"共 {len(industry['items'])} 个行业"
+                  f"（{industry['items'][0]['name']} {industry['items'][0]['weight']}% 居首）")
+    return result
+
+
 def update_html(file_path):
     print(f"正在处理文件: {file_path}")
     if not os.path.exists(file_path): return
@@ -603,6 +1106,8 @@ def update_html(file_path):
             or len(all_data[name].get("reg_high", [])) != len(dates)
             or "regression_start_index" not in all_data[name]
             or all_data[name].get("regression_window_years") != 10
+            or "max_drawdown_days" not in all_data[name]
+            or "current_drawdown_days" not in all_data[name]
         ):
             combined = sorted(zip(dates, values), key=lambda x: x[0])
             all_data[name]["dates"] = [x[0] for x in combined]
@@ -659,6 +1164,38 @@ def update_html(file_path):
                     else ""
                 )
                 print(f"{name} 跟踪数据已同步（{len(hit)} 个阶段 / {len(tracking['years'])} 个年度）{extra}")
+
+    # 指数估值（成分股权重加权）：PE-TTM / PB / 加权股息率，以及市值分布 / 行业分布
+    for name, blocks in fetch_index_metrics().items():
+        if name not in all_data:
+            continue
+        block = blocks["valuation"]
+        previous_valuation = all_data[name].get("valuation") or {}
+        # 只比较实质字段，忽略每次都会变的 updated_at，避免无意义的提交
+        if (
+            previous_valuation.get("pe_ttm") != block["pe_ttm"]
+            or previous_valuation.get("pb") != block["pb"]
+            or previous_valuation.get("dividend_yield") != block["dividend_yield"]
+            or previous_valuation.get("weight_date") != block["weight_date"]
+            or previous_valuation.get("source") != block["source"]
+            or previous_valuation.get("data_date") != block["data_date"]
+        ):
+            all_data[name]["valuation"] = block
+            updated_any = True
+
+        # 成分股画像：市值分布 + 行业分布
+        profile = {
+            "market_cap": blocks.get("market_cap") or {},
+            "industry": blocks.get("industry") or {},
+        }
+        if blocks.get("market_cap") or blocks.get("industry"):
+            previous_profile = all_data[name].get("profile") or {}
+            if (
+                previous_profile.get("market_cap") != profile["market_cap"]
+                or previous_profile.get("industry") != profile["industry"]
+            ):
+                all_data[name]["profile"] = profile
+                updated_any = True
 
     if updated_any:
         new_json = json.dumps(all_data, ensure_ascii=False)
