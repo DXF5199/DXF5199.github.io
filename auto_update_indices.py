@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 from bisect import bisect_left
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import time
 import os
 import tempfile
@@ -718,6 +718,14 @@ def _to_positive_float(raw):
     return value if value > 0 else None
 
 
+def _to_float(raw):
+    """把行情字段转成浮点数（允许负值，如亏损股的负市盈率），无效值返回 None。"""
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def _find_column(columns, *candidates):
     """按候选子串依次查找列名，找不到时抛出清晰的 ValueError。"""
     for pat in candidates:
@@ -763,12 +771,15 @@ def fetch_csi_weights(code):
 
 
 def _guess_market(code):
-    """国证的样本代码不带交易所前缀，按代码段推断所属市场。"""
-    if code[0] in "69":
-        return "sh"
+    """国证的样本代码不带交易所前缀，按代码段推断所属市场。
+
+    北交所常见代码段：43xxxx / 83xxxx / 87xxxx / 920xxx。
+    """
+    if code[0] in "69" or code.startswith("920"):
+        return "sh" if code[0] in "69" else "bj"
     if code[0] in "023":
         return "sz"
-    if code[0] in "48":
+    if code[0] in "438":
         return "bj"
     return "sh"
 
@@ -994,22 +1005,29 @@ def build_market_cap_block(rows, quotes):
     }
 
 
-def build_valuation_block(code, source="CSI"):
-    """按成分股权重加权计算指数的 PE-TTM / PB / 加权股息率。
+def build_valuation_block(rows, quotes, weight_date, source="CSI"):
+    """按成分股整体法计算指数的 PE-TTM / PB，股息率沿用指数权重算术加权。
 
-    股息率是市值的线性函数，用算术加权；
-    PE / PB 是「总量之比」，必须用调和加权 1/Σ(w/值)，否则会系统性高估。
+    PE / PB 口径与中证/国证指数官网及主流第三方平台一致（成分股加权平均）：
+        PE-TTM = Σ总市值 / Σ净利润TTM = Σ总市值 / Σ(总市值/PE)
+        PB     = Σ总市值 / Σ净资产    = Σ总市值 / Σ(总市值/PB)
+    二者等价于按总市值加权的调和平均。
+
+    注意：不能用指数权重加权——红利类指数按股息率加权、红利低波按
+    波动率加权，指数权重 ≠ 总市值权重，用指数权重做调和/算术平均会
+    系统性偏离官网整体法口径（实测中证红利 PE 10.73 vs 官网 9.01）。
+
+    细节：
+    - 亏损股（PE-TTM 为负）的负盈利计入分母，与官网口径一致；
+    - PE / PB 各自独立取有效样本，个股任一项缺失不影响另一项；
+    - 股息率维持原口径：指数权重算术加权，且个股需 PE / PB / 股息率
+      三者同时有效才计入。
     """
-    rows, weight_date = (
-        fetch_cni_weights(code) if source == "CNI" else fetch_csi_weights(code)
-    )
-    quotes = fetch_stock_quotes([row[0] for row in rows])
-
-    total_weight = 0.0
+    caps_pe, earnings = [], []      # (总市值, 净利润TTM=市值/PE)
+    caps_pb, book_values = [], []   # (总市值, 净资产=市值/PB)
+    total_weight = 0.0              # 股息率：指数权重算术加权（保持原口径）
     sum_dividend = 0.0
-    inv_pe = 0.0
-    inv_pb = 0.0
-    valid = 0
+    valid_dy = 0
     quote_dates = []
     for symbol, _name, weight, *_rest in rows:
         fields = quotes.get(symbol)
@@ -1019,58 +1037,134 @@ def build_valuation_block(code, source="CSI"):
         raw_time = fields[TENCENT_FIELD_TIME] if len(fields) > TENCENT_FIELD_TIME else ""
         if len(raw_time) >= 8 and raw_time[:8].isdigit():
             quote_dates.append(raw_time[:8])
-        pe = _to_positive_float(fields[TENCENT_FIELD_PE])
+        cap = _to_positive_float(fields[TENCENT_FIELD_MARKET_CAP])
+        pe = _to_float(fields[TENCENT_FIELD_PE])            # 允许负值（亏损股）
         pb = _to_positive_float(fields[TENCENT_FIELD_PB])
         dividend = _to_positive_float(fields[TENCENT_FIELD_DY])
-        if pe is None or pb is None or dividend is None:
+
+        # PE / PB：整体法，独立取有效样本（含亏损股负盈利）
+        if cap is not None:
+            if pe:
+                caps_pe.append(cap)
+                earnings.append(cap / pe)
+            if pb:
+                caps_pb.append(cap)
+                book_values.append(cap / pb)
+
+        # 股息率：保持原口径（指数权重算术加权；个股需三项指标同时有效）
+        if pe is None or pe <= 0 or pb is None or dividend is None:
             continue
         total_weight += weight
         sum_dividend += weight * dividend
-        inv_pe += weight / pe
-        inv_pb += weight / pb
-        valid += 1
+        valid_dy += 1
 
-    if not total_weight:
+    if not (caps_pe or caps_pb or total_weight):
         return {}
 
     return {
-        "pe_ttm": round(total_weight / inv_pe, 2) if inv_pe else None,
-        "pb": round(total_weight / inv_pb, 2) if inv_pb else None,
-        "dividend_yield": round(sum_dividend / total_weight, 2),
+        "pe_ttm": round(sum(caps_pe) / sum(earnings), 2) if earnings else None,
+        "pb": round(sum(caps_pb) / sum(book_values), 2) if book_values else None,
+        "dividend_yield": round(sum_dividend / total_weight, 2) if total_weight else None,
         "weight_date": weight_date,
         # 个股行情所属交易日：估值数据本身的日期
         "data_date": _normalize_date(max(quote_dates)) if quote_dates else weight_date,
         "source": "中证指数官网" if source == "CSI" else "国证指数官网",
         "component_count": len(rows),
-        "valid_count": valid,
+        "valid_count": valid_dy,
         "updated_at": now_cn().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
 
+def _history_sheet_name(index_name):
+    """指数名 → 历史数据键名（去掉「全收益」后缀）。"""
+    return index_name[:-3] if index_name.endswith("全收益") else index_name
+
+
+def load_pepb_history(content):
+    """从 HTML 文本中解析内嵌的 pepbHistory 历史序列。
+
+    返回 {指数名: {"dates": [...], "pe": [...], "pb": [...]}}，日期升序。
+    找不到内嵌块时返回空字典。
+    """
+    match = re.search(r'const pepbHistory = (\{.*?\});', content, re.DOTALL)
+    if not match:
+        return {}
+    try:
+        return json.loads(match.group(1))
+    except (ValueError, TypeError):
+        return {}
+
+
+def dump_pepb_history(history):
+    """把历史序列序列化成 HTML 内嵌的 JS 常量文本。"""
+    body = json.dumps(history, ensure_ascii=False, separators=(",", ":"))
+    return f"const pepbHistory = {body};"
+
+
+def append_history_entry(history, index_name, trade_date, pe, pb):
+    """把最新估值追加进内存中的历史序列（日期升序），返回是否写入。幂等：同日期跳过。"""
+    key = _history_sheet_name(index_name)
+    entry = history.setdefault(key, {"dates": [], "pe": [], "pb": []})
+    if trade_date in entry["dates"]:
+        return False
+    entry["dates"].append(trade_date)
+    entry["pe"].append(pe)
+    entry["pb"].append(pb)
+    # 保持日期升序
+    order = sorted(range(len(entry["dates"])), key=lambda i: entry["dates"][i])
+    entry["dates"] = [entry["dates"][i] for i in order]
+    entry["pe"] = [entry["pe"][i] for i in order]
+    entry["pb"] = [entry["pb"][i] for i in order]
+    return True
+
+
+def percentile_in_10y(dates, values, current):
+    """current 在近10年历史序列中的分位%（0~100，越高代表当前估值越贵）。
+
+    与工作簿内 F/G 列公式口径一致：100 × 小于当前值的个数 ÷ (有效值个数 − 1)。
+    """
+    if not dates or len(values) < 2 or current is None:
+        return None
+    latest = dates[-1]
+    try:
+        year, month, day = (int(x) for x in latest.split("-"))
+        cutoff = date(year - 10, month, day).isoformat()
+    except ValueError:  # 2月29日往前推10年不是闰日 → 回退 2月28日
+        cutoff = f"{int(latest[:4]) - 10}-{latest[5:10]}"
+    window = [v for dt, v in zip(dates, values) if dt >= cutoff]
+    if len(window) < 2:
+        return None
+    below = sum(1 for v in window if v < current)
+    return round(below / (len(window) - 1) * 100, 1)
+
+
 def fetch_index_metrics():
-    """计算全部已配置指数的估值 / 市值分布 / 行业分布，返回 {指数名: {...}}。"""
+    """计算全部已配置指数的估值 / 市值分布 / 行业分布，返回 {指数名: {...}}。
+
+    每个指数只下载一次成分股权重、抓取一次个股行情，供估值、市值分布
+    与行业分布共用，避免重复请求被数据源限流。
+    """
     result = {}
     for name, (code, source) in VALUATION_CONFIG.items():
-        try:
-            block = build_valuation_block(code, source)
-        except Exception as e:  # 第三方文件结构变化不应中断整体更新
-            print(f"⚠️ {name} 估值数据计算失败: {e}")
-            continue
-        if not block:
-            continue
-
-        # 复用同一批成分股行情算市值分布（不额外发请求）
-        market_cap = {}
-        industry = {}
         try:
             rows, weight_date = (
                 fetch_cni_weights(code) if source == "CNI" else fetch_csi_weights(code)
             )
             quotes = fetch_stock_quotes([row[0] for row in rows])
-            market_cap = build_market_cap_block(rows, quotes)
+        except Exception as e:  # 第三方文件结构变化不应中断整体更新
+            print(f"⚠️ {name} 成分股数据抓取失败: {e}")
+            continue
+
+        block = build_valuation_block(rows, quotes, weight_date, source)
+        if not block:
+            continue
+
+        market_cap = build_market_cap_block(rows, quotes)
+        try:
             industry = build_industry_block(rows, code, source, weight_date, name)
         except Exception as e:
-            print(f"⚠️ {name} 画像数据计算失败: {e}")
+            print(f"⚠️ {name} 行业分布计算失败: {e}")
+            industry = {}
 
         result[name] = {"valuation": block, "market_cap": market_cap, "industry": industry}
         print(
@@ -1108,7 +1202,6 @@ def update_html(file_path):
 
     match = re.search(r'let allData = (\{.*?\});', content, re.DOTALL)
     if not match: return
-    
     all_data = json.loads(match.group(1))
     updated_any = False
     # 先批量取一次全部 ETF 行情，避免逐只请求被限流
@@ -1214,10 +1307,28 @@ def update_html(file_path):
                 print(f"{name} 跟踪数据已同步（{len(hit)} 个阶段 / {len(tracking['years'])} 个年度）{extra}")
 
     # 指数估值（成分股权重加权）：PE-TTM / PB / 加权股息率，以及市值分布 / 行业分布
+    pepb_history = load_pepb_history(content)  # 从 HTML 内嵌块加载历史序列
+    history_changed = False
     for name, blocks in fetch_index_metrics().items():
         if name not in all_data:
             continue
         block = blocks["valuation"]
+
+        # 近10年估值分位：当前整体法 PE/PB 在内嵌历史序列中的位置
+        hist = pepb_history.get(_history_sheet_name(name)) or {}
+        if hist.get("dates"):
+            block["pe_percentile_10y"] = percentile_in_10y(
+                hist["dates"], hist["pe"], block["pe_ttm"])
+            block["pb_percentile_10y"] = percentile_in_10y(
+                hist["dates"], hist["pb"], block["pb"])
+
+        # 把最新估值追加进内嵌历史序列（幂等），供后续滚动计算分位
+        if block.get("pe_ttm") and block.get("pb") and block.get("data_date"):
+            if append_history_entry(pepb_history, name, block["data_date"],
+                                    block["pe_ttm"], block["pb"]):
+                history_changed = True
+                print(f"{name} 已追加 {block['data_date']} 估值至内嵌历史序列")
+
         previous_valuation = all_data[name].get("valuation") or {}
         # 只比较实质字段，忽略每次都会变的 updated_at，避免无意义的提交
         if (
@@ -1227,6 +1338,8 @@ def update_html(file_path):
             or previous_valuation.get("weight_date") != block["weight_date"]
             or previous_valuation.get("source") != block["source"]
             or previous_valuation.get("data_date") != block["data_date"]
+            or previous_valuation.get("pe_percentile_10y") != block.get("pe_percentile_10y")
+            or previous_valuation.get("pb_percentile_10y") != block.get("pb_percentile_10y")
         ):
             all_data[name]["valuation"] = block
             updated_any = True
@@ -1245,12 +1358,20 @@ def update_html(file_path):
                 all_data[name]["profile"] = profile
                 updated_any = True
 
-    if updated_any:
-        new_json = json.dumps(all_data, ensure_ascii=False)
-        # 用完整匹配段替换，避免 JSON 子串与正文其他文本重复时误替换
-        new_content = content[:match.start()] + f"let allData = {new_json};" + content[match.end():]
+    if updated_any or history_changed:
+        if updated_any:
+            new_json = json.dumps(all_data, ensure_ascii=False)
+            # 用完整匹配段替换，避免 JSON 子串与正文其他文本重复时误替换
+            content = content[:match.start()] + f"let allData = {new_json};" + content[match.end():]
+        if history_changed:
+            hist_match = re.search(r'const pepbHistory = \{.*?\};', content, re.DOTALL)
+            if hist_match:
+                content = (content[:hist_match.start()] + dump_pepb_history(pepb_history)
+                           + content[hist_match.end():])
+            else:
+                print("⚠️ HTML 中未找到 pepbHistory 块，历史序列未写回")
         with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(new_content)
+            f.write(content)
         print("🎉 所有指数及图表指标已成功同步更新。")
     else:
         print("ℹ️ 所有数据及指标已是最新。")
