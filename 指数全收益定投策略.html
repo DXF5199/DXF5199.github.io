@@ -128,22 +128,27 @@
         .industry-item-name i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 7px; flex-shrink: 0; }
         .industry-item-weight { color: #8b949e; font-variant-numeric: tabular-nums; }
         #chart-style-ratio, #chart-style-dual { width: 100%; height: 440px; }
-        /* 三条参考线的说明浮层：固定在图表右上角，替代原来贴在线上、会遮挡数据线的标签 */
+        /* 三条参考线的说明浮层：横排在绘图区「上方」的空白带内（grid.top = 40px 之上），
+           与数据区完全分离 —— 无论切到近3月还是全部，都不可能遮住线条。 */
         .ratio-chart-wrap { position: relative; }
         .ratio-ref-legend {
-            position: absolute; top: 8px; right: 16px;
-            display: flex; flex-direction: column; gap: 4px;
-            padding: 6px 9px;
-            background: rgba(13, 17, 23, 0.86);
+            position: absolute; top: 2px; right: 14px;
+            display: flex; align-items: center; gap: 14px;
+            padding: 3px 10px;
+            background: rgba(13, 17, 23, 0.9);
             border: 1px solid #30363d; border-radius: 5px;
-            font-size: 11.5px; line-height: 1.25;
+            font-size: 11px; line-height: 1.15; white-space: nowrap;
             font-variant-numeric: tabular-nums;
             pointer-events: none; z-index: 3;
         }
-        .ratio-ref-legend .rrl-row { display: flex; align-items: center; gap: 7px; }
-        .ratio-ref-legend .rrl-line { width: 15px; flex: none; border-top-width: 2px; border-top-style: dashed; }
-        .ratio-ref-legend .rrl-name { color: #c9d1d9; white-space: nowrap; }
-        .ratio-ref-legend .rrl-val { font-weight: 700; margin-left: auto; }
+        .ratio-ref-legend .rrl-row { display: flex; align-items: center; gap: 5px; }
+        .ratio-ref-legend .rrl-line { width: 14px; flex: none; border-top-width: 2px; border-top-style: dashed; }
+        .ratio-ref-legend .rrl-name { color: #c9d1d9; }
+        .ratio-ref-legend .rrl-val { font-weight: 700; }
+        @media (max-width: 1040px) {
+            .ratio-ref-legend { gap: 9px; font-size: 10px; padding: 3px 7px; }
+            .ratio-ref-legend .rrl-line { width: 11px; }
+        }
 
         /* 【指数分析工作台】紧凑排布（仅作用于本页，不影响估值仪表盘 / 价值&成长仪表盘） */
         #page-analysis .top-controls { margin-bottom: 12px; gap: 10px; }
@@ -1544,6 +1549,8 @@
                 // 图例显式配色，确保图例色块与上下两条线的红/蓝完全一致
                 legend: {
                     ...chartOptBase.legend,
+                    // 靠左放置：右上角让给三条参考线的说明浮层，窄屏下也不会相撞
+                    left: 'left',
                     data: [
                         { name: '价值风向', itemStyle: { color: '#f85149' } },
                         { name: '成长风向', itemStyle: { color: '#58a6ff' } }
