@@ -5,10 +5,26 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 from bisect import bisect_left
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import time
 import os
 import tempfile
+
+try:
+    from zoneinfo import ZoneInfo
+    CN_TZ = ZoneInfo("Asia/Shanghai")
+except Exception:
+    CN_TZ = timezone(timedelta(hours=8))
+
+
+def now_cn():
+    """返回北京时间（兼容无 zoneinfo 的环境）。"""
+    return datetime.now(CN_TZ)
+
+
+def ts_to_date_cn(ts):
+    """把 Unix 时间戳转成北京时间日期字符串。"""
+    return datetime.fromtimestamp(int(ts), CN_TZ).strftime("%Y-%m-%d")
 
 # 配置指数代码映射
 INDEX_CONFIG = [
@@ -131,7 +147,7 @@ SECID_PREFIX = {"sh": "1", "sz": "0"}
 
 
 def _request_with_retry(url, tries=3, sleep_seconds=1.5, **kwargs):
-    """带重试的 GET：行情接口常被限流短暂返回 403 / Forbidden。"""
+    """带重试的 GET：对短暂网络错误重试；对明确的客户端错误码直接失败，不重试。"""
     last_error = None
     for attempt in range(tries):
         try:
@@ -139,6 +155,9 @@ def _request_with_retry(url, tries=3, sleep_seconds=1.5, **kwargs):
             if response.status_code == 200:
                 return response
             last_error = f"HTTP {response.status_code}"
+            # 4xx 属于客户端错误，重试通常无效，直接失败
+            if 400 <= response.status_code < 500:
+                break
         except requests.RequestException as e:
             last_error = str(e)
         if attempt < tries - 1:
@@ -167,7 +186,7 @@ def fetch_etf_from_eastmoney(code, market):
         if data.get("f60") is not None:
             quote["prev_close"] = round(float(data["f60"]) / factor, 4)
         if data.get("f86"):
-            quote["quote_date"] = datetime.fromtimestamp(int(data["f86"])).strftime("%Y-%m-%d")
+            quote["quote_date"] = ts_to_date_cn(data["f86"])
         return quote
     except (requests.RequestException, ValueError, TypeError, KeyError) as e:
         print(f"东方财富 ETF {code} 抓取失败: {e}")
@@ -289,7 +308,7 @@ def build_etf_block(data_obj, etf_meta, quote):
         "current_drawdown": round(current_dd, 2),
         "peak_price": round(peak_price, 4),
         "levels": levels,
-        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "updated_at": now_cn().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
 
@@ -481,7 +500,7 @@ def build_tracking_block(data_obj, etf_meta):
         "periods": periods,
         "years": years,
         "skipped_periods": skipped,
-        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "updated_at": now_cn().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
 
@@ -506,10 +525,10 @@ def fetch_csi_history(code, last_saved_date):
     try:
         last_dt = datetime.strptime(last_saved_date, "%Y-%m-%d")
     except (TypeError, ValueError):
-        last_dt = datetime.now() - timedelta(days=30)
+        last_dt = now_cn() - timedelta(days=30)
 
     start_date = (last_dt - timedelta(days=14)).strftime("%Y%m%d")
-    end_date = datetime.now().strftime("%Y%m%d")
+    end_date = now_cn().strftime("%Y%m%d")
     url = "https://www.csindex.com.cn/csindex-home/perf/index-perf"
     params = {"indexCode": code, "startDate": start_date, "endDate": end_date}
     headers = {
@@ -540,9 +559,9 @@ def fetch_csi_history(code, last_saved_date):
     return {}
 
 def fetch_cni_history(code):
-    url = "http://hq.cnindex.com.cn/market/market/getIndexDailyDataWithDataFormat"
-    end_str = datetime.now().strftime("%Y-%m-%d")
-    start_str = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
+    url = "https://hq.cnindex.com.cn/market/market/getIndexDailyDataWithDataFormat"
+    end_str = now_cn().strftime("%Y-%m-%d")
+    start_str = (now_cn() - timedelta(days=60)).strftime("%Y-%m-%d")
     params = {"indexCode": code, "startDate": start_str, "endDate": end_str, "frequency": "day"}
     try:
         r = requests.get(url, params=params, timeout=15)
@@ -624,7 +643,8 @@ def update_index_calculations(data_obj):
     data_obj.pop("avg_recovery_days", None)
     # 已回撤天数：从最近一次刷新历史新高，到最新交易日
     running_max = np.maximum.accumulate(prices)
-    fresh_highs = np.flatnonzero(prices >= running_max)
+    # 浮点精度保护：用微小容差避免漏判新高
+    fresh_highs = np.flatnonzero(prices + 1e-6 >= running_max)
     last_peak_idx = int(fresh_highs[-1]) if len(fresh_highs) else 0
     data_obj["current_drawdown_days"] = int(n_total - 1 - last_peak_idx)
     
@@ -698,6 +718,15 @@ def _to_positive_float(raw):
     return value if value > 0 else None
 
 
+def _find_column(columns, *candidates):
+    """按候选子串依次查找列名，找不到时抛出清晰的 ValueError。"""
+    for pat in candidates:
+        for col in columns:
+            if pat in col:
+                return col
+    raise ValueError(f"未在列 {columns} 中找到匹配 {candidates} 的列")
+
+
 def fetch_csi_weights(code):
     """下载并解析中证指数成分股权重，返回 ([(symbol, 名称, 权重%)], 权重日期)。"""
     response = _request_with_retry(
@@ -708,11 +737,11 @@ def fetch_csi_weights(code):
 
     frame = pd.read_excel(tmp_path, header=0)
     columns = list(frame.columns)
-    col_code = next(c for c in columns if "成份券代码" in c)
-    col_exchange = next(c for c in columns if c.startswith("交易所"))
-    col_weight = next(c for c in columns if "权重" in c)
-    col_name = next(c for c in columns if "成份券名称" in c)
-    col_date = next(c for c in columns if "日期" in c)
+    col_code = _find_column(columns, "成份券代码", "代码")
+    col_exchange = _find_column(columns, "交易所")
+    col_weight = _find_column(columns, "权重")
+    col_name = _find_column(columns, "成份券名称", "名称")
+    col_date = _find_column(columns, "日期")
 
     rows = []
     for _, row in frame.iterrows():
@@ -754,10 +783,10 @@ def fetch_cni_weights(code):
 
     frame = pd.read_excel(tmp_path, header=0)
     columns = list(frame.columns)
-    col_code = next(c for c in columns if "样本代码" in c)
-    col_weight = next(c for c in columns if "权重" in c)
-    col_name = next(c for c in columns if "样本简称" in c)
-    col_date = next(c for c in columns if "日期" in c)
+    col_code = _find_column(columns, "样本代码", "代码")
+    col_weight = _find_column(columns, "权重")
+    col_name = _find_column(columns, "样本简称", "简称", "名称")
+    col_date = _find_column(columns, "日期")
     # 国证样本权重文件自带行业列（国证行业分类），作为其行业分布来源
     col_industry = next((c for c in columns if "行业" in str(c)), None)
 
@@ -1014,7 +1043,7 @@ def build_valuation_block(code, source="CSI"):
         "source": "中证指数官网" if source == "CSI" else "国证指数官网",
         "component_count": len(rows),
         "valid_count": valid,
-        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "updated_at": now_cn().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
 
@@ -1091,11 +1120,15 @@ def update_html(file_path):
             
         dates, values = all_data[name]["dates"], all_data[name]["values"]
         last_saved_date = max(dates) if dates else None
-        recent_data = (
-            fetch_csi_history(code, last_saved_date)
-            if source == "CSI"
-            else fetch_cni_history(code)
-        )
+        recent_data = {}
+        try:
+            recent_data = (
+                fetch_csi_history(code, last_saved_date)
+                if source == "CSI"
+                else fetch_cni_history(code)
+            )
+        except Exception as e:
+            print(f"⚠️ {name}（{code}）历史数据抓取失败，保留本地数据: {e}")
         index_updated = False
         
         if recent_data:
@@ -1214,7 +1247,8 @@ def update_html(file_path):
 
     if updated_any:
         new_json = json.dumps(all_data, ensure_ascii=False)
-        new_content = content.replace(match.group(1), new_json)
+        # 用完整匹配段替换，避免 JSON 子串与正文其他文本重复时误替换
+        new_content = content[:match.start()] + f"let allData = {new_json};" + content[match.end():]
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(new_content)
         print("🎉 所有指数及图表指标已成功同步更新。")
