@@ -219,12 +219,20 @@
         #page-analysis .view-switch { margin-bottom: 12px; }
 
         /* 指数估值水位表 */
-        #page-analysis .val-table { width: 100%; border-collapse: collapse; font-size: 15px; }
+        #page-analysis .val-table { width: 100%; border-collapse: collapse; font-size: 15px; table-layout: fixed; }
+        #page-analysis .val-table th:nth-child(1), #page-analysis .val-table td:nth-child(1) { width: 175px; }
+        #page-analysis .val-table th:nth-child(2), #page-analysis .val-table td:nth-child(2) { width: 95px; }
+        #page-analysis .val-table th:nth-child(3), #page-analysis .val-table td:nth-child(3) { width: 145px; }
+        #page-analysis .val-table th:nth-child(4), #page-analysis .val-table td:nth-child(4) { width: 95px; }
+        #page-analysis .val-table th:nth-child(5), #page-analysis .val-table td:nth-child(5) { width: 145px; }
+        #page-analysis .val-table th:nth-child(6), #page-analysis .val-table td:nth-child(6) { width: 105px; }
+        #page-analysis .val-table th:nth-child(7), #page-analysis .val-table td:nth-child(7) { width: 95px; }
         #page-analysis .val-table th {
             text-align: right; color: #8b949e; font-size: 13px; font-weight: 600;
             padding: 10px 14px; border-bottom: 1px solid #30363d; white-space: nowrap;
         }
         #page-analysis .val-table th:first-child { text-align: left; }
+        #page-analysis .val-table th.pct-col { text-align: center; }
         #page-analysis .val-table td {
             text-align: right; padding: 11px 14px; border-bottom: 1px solid #21262d;
             font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, monospace;
@@ -240,9 +248,9 @@
         #page-analysis .val-dy-hi { color: #f85149; font-weight: 700; }
         #page-analysis .val-dy-mid { color: #d29922; font-weight: 600; }
         #page-analysis .val-dy-lo { color: #8b949e; }
-        #page-analysis .val-pct-high { color: #f85149; font-weight: 700; }
-        #page-analysis .val-pct-mid { color: #d29922; font-weight: 600; }
-        #page-analysis .val-pct-low { color: #3fb950; font-weight: 600; }
+        #page-analysis .pct-bar-wrap { position: relative; width: 125px; height: 18px; margin: 0 auto; background: #0d1117; border: 1px solid #58a6ff66; border-radius: 9px; overflow: hidden; box-sizing: border-box; }
+        #page-analysis .pct-bar-fill { height: 100%; min-width: 6px; transition: width .3s; }
+        #page-analysis .pct-bar-label { position: absolute; right: 7px; top: 50%; transform: translateY(-50%); font-size: 11px; font-weight: 700; color: #f0f6fc; text-shadow: 0 1px 3px rgba(0,0,0,.9); }
         #page-analysis .val-foot { color: #6e7681; font-size: 12.5px; margin-top: 8px; line-height: 1.7; }
 
         /* 估值仪表盘 */
@@ -490,9 +498,9 @@
                             <tr>
                                 <th>指数</th>
                                 <th>PE-TTM</th>
-                                <th>PE 10年分位</th>
+                                <th class="pct-col"><span style="display:inline-block;width:125px;text-align:center;">PE 10年分位</span></th>
                                 <th>PB</th>
-                                <th>PB 10年分位</th>
+                                <th class="pct-col"><span style="display:inline-block;width:125px;text-align:center;">PB 10年分位</span></th>
                                 <th>加权股息率</th>
                                 <th>成分股</th>
                             </tr>
@@ -1274,16 +1282,11 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
             const fmtNum = (value, digits) => (value === null || value === undefined)
                 ? '<span class="val-na">—</span>'
                 : Number(value).toFixed(digits);
-            // 近10年估值分位着色：高估红、中位黄、低估绿
-            const pctClass = p => {
-                if (p === null || p === undefined) return 'val-na';
-                if (p >= 70) return 'val-pct-high';
-                if (p <= 30) return 'val-pct-low';
-                return 'val-pct-mid';
-            };
+            // 近10年估值分位条状图：≥80% 红（贵）、≤20% 绿（便宜）、其余蓝
+            const pctColor = p => p >= 80 ? '#f85149' : (p <= 20 ? '#3fb950' : '#4493f8');
             const fmtPct = p => (p === null || p === undefined)
                 ? '<span class="val-na">—</span>'
-                : Number(p).toFixed(1) + '%';
+                : `<div class="pct-bar-wrap"><div class="pct-bar-fill" style="width:${Math.min(Math.max(Number(p), 0), 100)}%;background:${pctColor(Number(p))}"></div><span class="pct-bar-label">${Number(p).toFixed(1)}%</span></div>`;
             // 股息率分档着色：越高越突出
             const dyClass = dy => {
                 if (dy === null || dy === undefined) return 'val-na';
@@ -1299,9 +1302,9 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
                 return `<tr>
                     <td>${name}</td>
                     <td>${fmtNum(v ? v.pe_ttm : null, 2)}</td>
-                    <td class="${pctClass(v ? v.pe_percentile_10y : null)}">${fmtPct(v ? v.pe_percentile_10y : null)}</td>
+                    <td>${fmtPct(v ? v.pe_percentile_10y : null)}</td>
                     <td>${fmtNum(v ? v.pb : null, 2)}</td>
-                    <td class="${pctClass(v ? v.pb_percentile_10y : null)}">${fmtPct(v ? v.pb_percentile_10y : null)}</td>
+                    <td>${fmtPct(v ? v.pb_percentile_10y : null)}</td>
                     <td class="${dyClass(dy)}">${dy === null || dy === undefined ? '<span class="val-na">—</span>' : Number(dy).toFixed(2) + '%'}</td>
                     <td>${comp ? comp : '<span class="val-na">—</span>'}</td>
                 </tr>`;
