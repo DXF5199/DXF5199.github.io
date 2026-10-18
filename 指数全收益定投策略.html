@@ -59,6 +59,7 @@
         
         /* 缩小净值图高度 */
         #chart-main { width: 100%; height: 250px; }
+        #chart-yearly { width: 100%; height: 260px; }
         #chart-dd, #chart-reg { width: 100%; height: 330px; }
 
         /* ---- 成份股数据 ---- */
@@ -345,7 +346,7 @@
         <!-- 页面切换导航栏 -->
         <div class="nav-tabs">
             <button class="tab-btn active" onclick="switchPage('analysis', event)">📊 指数分析工作台</button>
-            <button class="tab-btn" onclick="switchPage('dashboard', event)">📈 估值仪表盘</button>
+            <button class="tab-btn" onclick="switchPage('dashboard', event)">📈 红利估值仪表盘</button>
             <button class="tab-btn" onclick="switchPage('style', event)">⚖️ 价值&成长仪表盘</button>
         </div>
 
@@ -437,6 +438,12 @@
                     <div id="chart-main" _echarts_instance_="ec_1786493674621" style="user-select: none; -webkit-tap-highlight-color: rgba(0, 0, 0, 0); position: relative;"><div style="position: relative; width: 1350px; height: 320px; padding: 0px; margin: 0px; border-width: 0px; cursor: pointer;"><canvas data-zr-dom-id="zr_0" width="1687" height="400" style="position: absolute; left: 0px; top: 0px; width: 1350px; height: 320px; user-select: none; -webkit-tap-highlight-color: rgba(0, 0, 0, 0); padding: 0px; margin: 0px; border-width: 0px;"></canvas></div><div class="" style="position: absolute; display: block; border-style: solid; white-space: nowrap; z-index: 9999999; box-shadow: rgba(0, 0, 0, 0.2) 1px 2px 10px; background-color: rgb(22, 27, 34); border-width: 1px; border-radius: 4px; color: rgb(230, 237, 243); line-height: 21px; padding: 10px; top: 0px; left: 0px; transform: translate3d(680px, 232px, 0px); border-color: rgb(48, 54, 61); pointer-events: none; visibility: hidden; opacity: 0;"><div style="margin: 0px 0 0;line-height:1;"><div style="margin: 0px 0 0;line-height:1;"><div style="font-size:14px;color:#e6edf3;font-weight:400;line-height:1;">2020-08-24</div><div style="margin: 10px 0 0;line-height:1;"><div style="margin: 0px 0 0;line-height:1;"><div style="margin: 0px 0 0;line-height:1;"><span style="display:inline-block;margin-right:4px;border-radius:10px;width:10px;height:10px;background-color:#4992ff;"></span><span style="font-size:14px;color:#e6edf3;font-weight:400;margin-left:2px">点位</span><span style="float:right;margin-left:20px;font-size:14px;color:#e6edf3;font-weight:900">7,473.14</span><div style="clear:both"></div></div><div style="clear:both"></div></div><div style="clear:both"></div></div><div style="clear:both"></div></div><div style="clear:both"></div></div></div></div>
                 </div>
             
+                <!-- 1.5 各年度收益图（年度收益为正：0轴上方红色柱；为负：0轴下方绿色柱） -->
+                <div class="chart-box" id="box-yearly">
+                    <div class="chart-title" id="yearly-chart-title" style="text-align:center; margin-bottom:15px;">各年度收益</div>
+                    <div id="chart-yearly"></div>
+                </div>
+
                 <!-- 2. 回撤分析图 (带显隐开关，默认显示全部区间) -->
                 <div class="chart-box" id="box-dd">
                     <div class="chart-header">
@@ -614,6 +621,7 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
         const mainChart = echarts.init(document.getElementById('chart-main'), 'dark');
         const ddChart = echarts.init(document.getElementById('chart-dd'), 'dark');
         const regChart = echarts.init(document.getElementById('chart-reg'), 'dark');
+        const yearlyChart = echarts.init(document.getElementById('chart-yearly'), 'dark');
         // 成分股画像的行业环形图按需初始化（容器在画像视图内）
         let industryChart = null;
         let dashboardCharts = {};
@@ -769,6 +777,7 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
                         renderValuation();
                     } else {
                         mainChart.resize();
+                        yearlyChart.resize();
                         ddChart.resize();
                         regChart.resize();
                     }
@@ -1127,6 +1136,7 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
                     renderValuation();
                 } else {
                     mainChart.resize();
+                    yearlyChart.resize();
                     ddChart.resize();
                     regChart.resize();
                     // 画像里的环形图同样需要在容器可见后 resize，否则会被压扁
@@ -1357,6 +1367,33 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
             });
         }
 
+        // 计算各年度收益（%）：年度收益 = 该年最后一个交易日点位 / 上一年最后一个交易日点位 - 1。
+        // 最早一年以序列首个交易日为基准（起点接近年初，误差可忽略）；
+        // 最后一个自然年若尚未走完，则为今年以来收益（tooltip 中标注）。
+        function computeYearlyReturns(data) {
+            const dates = data.dates, values = data.values;
+            if (!dates || !values || dates.length < 2) return [];
+            const yearEnd = {};   // {year: 该年最后一个交易日的点位}（日期升序，遍历覆盖即保留年末值）
+            for (let i = 0; i < dates.length; i++) {
+                yearEnd[parseInt(dates[i].slice(0, 4), 10)] = values[i];
+            }
+            const firstYear = parseInt(dates[0].slice(0, 4), 10);
+            const lastYear = parseInt(dates[dates.length - 1].slice(0, 4), 10);
+            const lastDateTail = dates[dates.length - 1].slice(5);   // "MM-DD"
+            const out = [];
+            for (let y = firstYear; y <= lastYear; y++) {
+                if (yearEnd[y] === undefined || yearEnd[y] === null) continue;
+                const base = (y === firstYear) ? values[0] : yearEnd[y - 1];
+                if (base === undefined || base === null) continue;
+                out.push({
+                    year: y,
+                    value: Math.round((yearEnd[y] / base - 1) * 10000) / 100,
+                    partial: (y === lastYear && lastDateTail !== '12-31'),
+                });
+            }
+            return out;
+        }
+
         function updateUI() {
             const data = allData[currentIndex];
             document.getElementById('stat-val').innerText = data.values[data.values.length - 1].toLocaleString(undefined, {minimumFractionDigits: 2});
@@ -1402,6 +1439,44 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
                     name: '点位', type: 'line', data: data.values, showSymbol: false, 
                     lineStyle: { width: 2, color: '#58a6ff' },
                     areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{offset: 0, color: 'rgba(88,166,255,0.15)'}, {offset: 1, color: 'rgba(88,166,255,0)'}]) }
+                }]
+            }, true);
+
+            // 1.5 各年度收益图：正收益为 0 轴上方红色柱，负收益为 0 轴下方绿色柱
+            document.getElementById('yearly-chart-title').innerText = currentIndex + ' 各年度收益';
+            const yearlyData = computeYearlyReturns(data);
+            yearlyChart.setOption({
+                ...chartOptBase,
+                title: { show: false },
+                legend: { show: false },
+                tooltip: {
+                    trigger: 'axis', backgroundColor: '#161b22', borderColor: '#30363d', textStyle: { color: '#e6edf3' },
+                    formatter: (params) => {
+                        const p = params[0];
+                        const item = yearlyData[p.dataIndex] || {};
+                        const suffix = item.partial ? '（今年以来）' : '';
+                        const v = p.value;
+                        if (v === null || v === undefined || isNaN(v)) return p.name + '年' + suffix + '<br>—';
+                        const color = v >= 0 ? '#f85149' : '#3fb950';
+                        return '<div style="font-weight:600;margin-bottom:4px;">' + p.name + '年' + suffix + '</div>'
+                            + '<span style="color:' + color + ';font-weight:bold;">' + (v >= 0 ? '+' : '') + v.toFixed(2) + '%</span>';
+                    }
+                },
+                grid: { top: 28, left: '4%', right: '4%', bottom: 30 },
+                xAxis: { type: 'category', data: yearlyData.map(d => String(d.year)), axisLine: { lineStyle: { color: '#30363d' } }, axisTick: { show: false }, splitLine: { show: false } },
+                yAxis: { type: 'value', splitLine: { lineStyle: { color: '#21262d', type: 'dashed' } }, axisLabel: { formatter: '{value}%' } },
+                series: [{
+                    name: '年度收益', type: 'bar',
+                    data: yearlyData.map(d => ({
+                        value: d.value,
+                        itemStyle: {
+                            // 中国市场惯例：涨红跌绿
+                            color: d.value >= 0 ? '#f85149' : '#3fb950',
+                            borderRadius: d.value >= 0 ? [3, 3, 0, 0] : [0, 0, 3, 3],
+                        }
+                    })),
+                    barMaxWidth: 42,
+                    z: 3
                 }]
             }, true);
 
