@@ -109,6 +109,19 @@
         .industry-level-switch .lvl-btn.active { background: #1f6feb; border-color: #1f6feb; color: #fff; }
         .industry-level-switch .lvl-btn:disabled { opacity: .4; cursor: default; }
         .profile-empty { font-size: 12px; color: #6e7681; padding: 12px 0; text-align: center; }
+        /* 编制规则面板：紧凑小字排版 */
+        .rules-content { font-size: 11.5px; line-height: 1.65; color: #8b949e; }
+        .rules-content .rule-row { display: flex; gap: 8px; margin-bottom: 8px; align-items: flex-start; }
+        .rules-content .rule-row:last-child { margin-bottom: 0; }
+        .rules-content .rule-tag {
+            flex: 0 0 34px; text-align: center; font-size: 10.5px; line-height: 1; padding: 3px 0; margin-top: 2px;
+            border-radius: 4px; background: #21262d; border: 1px solid #30363d; color: #58a6ff; white-space: nowrap;
+        }
+        .rules-content .rule-text { flex: 1; min-width: 0; }
+        .rules-content .rule-text b { color: #c9d1d9; font-weight: 600; }
+        .rules-content .rules-foot { margin-top: 10px; padding-top: 8px; border-top: 1px dashed #21262d; font-size: 10.5px; color: #6e7681; }
+        .rules-content .rules-foot a { color: #58a6ff; text-decoration: none; }
+        .rules-content .rules-foot a:hover { text-decoration: underline; }
         .cap-summary { display: flex; align-items: center; justify-content: space-around; padding: 12px 0 20px; }
         .cap-metric { text-align: center; }
         .cap-value { font-size: 22px; font-weight: 700; color: #e6edf3; font-variant-numeric: tabular-nums; }
@@ -404,6 +417,15 @@
                                     <div id="chart-industry"></div>
                                     <div id="industry-list" class="industry-list"></div>
                                 </div>
+                            </div>
+
+                            <!-- 编制规则 -->
+                            <div class="profile-panel">
+                                <div class="profile-panel-title">
+                                    <span>📜 编制规则</span>
+                                    <span id="rules-source" class="profile-note"></span>
+                                </div>
+                                <div id="index-rules" class="rules-content"></div>
                             </div>
                         </div>
                     </div>
@@ -1155,12 +1177,111 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
             return industryChart;
         }
 
+        // ===== 各指数编制规则（左侧栏展示，整理自中证指数/国证指数官方编制方案） =====
+        const INDEX_RULES = {
+            '中证红利全收益': {
+                source: '中证指数 · 价格指数 000922',
+                base: '2004-12-31',
+                url: 'https://www.csindex.com.cn/#/indices/family/detail?indexCode=000922',
+                rows: [
+                    ['样本', '中证全指样本中：过去一年日均总市值、成交金额均在<b>前 80%</b>；<b>过去三年连续现金分红</b>，且过去三年股利支付率均值与过去一年股利支付率均大于 0 小于 1'],
+                    ['选样', '按<b>过去三年平均现金股息率</b>由高到低排名，选取 <b>100</b> 只'],
+                    ['加权', '<b>股息率加权</b>；单样本 ≤10%，总市值 100 亿以下样本 ≤0.5%'],
+                    ['调样', '<b>每年一次</b>（12 月第二个星期五的下一交易日），原样本设缓冲区'],
+                ]
+            },
+            '智选高股息全收益': {
+                source: '中证指数 · 价格指数 932305',
+                base: '2005-12-30',
+                url: 'https://www.csindex.com.cn/#/indices/family/detail?indexCode=932305',
+                rows: [
+                    ['样本', '中证全指样本中：过去一年日均成交金额<b>前 90%</b>'],
+                    ['选样', '过去三年连续分红，且<b>已披露现金分红预案</b>（预案每股税前股利>0）；按<b>预案股息率</b>降序选取 <b>50</b> 只'],
+                    ['加权', '<b>预案股息率 / 过去一年波动率</b>加权；单样本 ≤10%'],
+                    ['调样', '<b>每年 5 月第 6 个交易日</b>（紧贴年报分红预案披露窗口，早于多数红利指数的 12 月调样）'],
+                ]
+            },
+            '红利低波全收益': {
+                source: '中证指数 · 价格指数 H30269',
+                base: '2005-12-30',
+                url: 'https://www.csindex.com.cn/#/indices/family/detail?indexCode=H30269',
+                rows: [
+                    ['样本', '中证全指样本中：<b>过去 3 年连续分红</b>且每年税后股息率>0；日均总市值、成交金额前 80%'],
+                    ['选样', '剔除红利支付率前 5%（过高）或为负、每股股利增长率非正的证券；按<b>过去 3 年平均税后股息率</b>降序取 75 只，再按<b>过去一年波动率</b>升序取 <b>50</b> 只'],
+                    ['加权', '<b>股息率加权</b>；单样本 ≤15%'],
+                    ['调样', '<b>每年一次</b>（12 月第二个星期五的下一交易日）'],
+                ]
+            },
+            '红利低波100全收益': {
+                source: '中证指数 · 价格指数 930955',
+                base: '2005-12-30',
+                url: 'https://www.csindex.com.cn/#/indices/family/detail?indexCode=930955',
+                rows: [
+                    ['样本', '同中证全指样本空间'],
+                    ['选样', '剔除过去一年日均成交额后 20%；选取<b>过去三年连续分红</b>且每年股息率>0 的证券；按股息率（近三年分红总额/3 ÷ 总市值）降序取 300 只，再按<b>过去一年波动率</b>升序取 <b>100</b> 只'],
+                    ['加权', '<b>股息率 / 波动率加权</b>；中证二级行业权重 ≤20%'],
+                    ['调样', '<b>每季度一次</b>（3/6/9/12 月第二个星期五的下一交易日）'],
+                ]
+            },
+            'A500红利低波全收益': {
+                source: '中证指数 · 价格指数 932422',
+                base: '2013-12-31',
+                url: 'https://www.csindex.com.cn/#/indices/family/detail?indexCode=932422',
+                rows: [
+                    ['样本', '仅限<b>中证A500指数样本</b>（大盘蓝筹池）'],
+                    ['选样', '过去三年连续分红、三年平均股利支付率大于 0 小于 1、过去 12 个季度 ROE 标准差排名前 80%；按<b>过去三年平均股息率</b>降序取前 50%，再按<b>过去一年波动率</b>升序取 <b>50</b> 只'],
+                    ['加权', '<b>股息率加权</b>；单样本 ≤10%，单一一级行业 ≤30%'],
+                    ['调样', '<b>每半年一次</b>（6/12 月），每次调整比例 ≤30%'],
+                ]
+            },
+            '价值100全收益': {
+                source: '国证指数 · 价格指数 980081',
+                base: '2012-12-31',
+                url: 'https://www.cnindex.com.cn/docs/gz_980081.pdf',
+                rows: [
+                    ['样本', '沪深北全部 A 股及红筹存托凭证（非 ST/*ST；科创板、北交所上市满 1 年，其余满 6 个月）'],
+                    ['选样', '剔除成交额/总市值后 20%、亏损股；剔除过去 12 季度 ROE 均值后 20%、ROE 波动率前 20%、自由现金流率后 50%；按<b>价值得分</b>（市盈率倒数 + 股息率 + 自由现金流率，金融地产不含第三项）取 <b>100</b> 只'],
+                    ['加权', '<b>价值得分倾斜的自由流通市值加权</b>；单样本 ≤8%，国证二级行业 ≤20%'],
+                    ['调样', '<b>每季度一次</b>（3/6/9/12 月第二个星期五的下一交易日），每次 ≤50%'],
+                ]
+            },
+            '成长100全收益': {
+                source: '国证指数 · 价格指数 980080',
+                base: '2012-12-31',
+                url: 'https://www.cnindex.com.cn/docs/gz_980080.pdf',
+                rows: [
+                    ['样本', '同价值100，另要求近半年日均总市值 <b>≥50 亿元</b>'],
+                    ['选样', '剔除成交额后 20%、亏损股，剔除 ROE 环比变化后 20%、单季毛利率变化后 20%；按 4 个成长指标（单季净利润超预期 SUE、一致预期净利润 3 个月环比、一致预期 2 年复合增速、一致预期次年 ROE 同比）<b>综合排名</b>取 <b>100</b> 只'],
+                    ['加权', '<b>综合排名倾斜的自由流通市值加权</b>；单样本 ≤10%'],
+                    ['调样', '<b>每季度一次</b>（2/5/8/11 月第 6 个交易日），每次 ≤50%'],
+                ]
+            },
+        };
+
+        function renderRules(name) {
+            const el = document.getElementById('index-rules');
+            const srcEl = document.getElementById('rules-source');
+            if (!el) return;
+            const r = INDEX_RULES[name];
+            if (!r) {
+                el.innerHTML = '<div class="profile-empty">暂无编制规则数据</div>';
+                if (srcEl) srcEl.textContent = '';
+                return;
+            }
+            el.innerHTML = r.rows.map(row =>
+                '<div class="rule-row"><span class="rule-tag">' + row[0] + '</span><span class="rule-text">' + row[1] + '</span></div>'
+            ).join('')
+                + '<div class="rules-foot">基日 ' + r.base + '｜<a href="' + r.url + '" target="_blank" rel="noopener">官方编制方案 ↗</a></div>';
+            if (srcEl) srcEl.textContent = r.source;
+        }
+
         function renderProfile(name) {
             const profile = (allData[name] || {}).profile || {};
             const mc = profile.market_cap || {};
             const ind = profile.industry || {};
 
             document.getElementById('profile-title').textContent = name + ' 成份股数据';
+            renderRules(name);
 
             const notes = [];
             if (mc.count) notes.push('市值：成分股逐股总市值（腾讯行情 · ' + mc.count + ' 只有效）');
