@@ -31,6 +31,11 @@
 
         .top-controls { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 16px; }
         .selector { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+        /* 指数选择器：分组两行布局 */
+        #index-selector { flex-direction: column; align-items: stretch; gap: 8px; }
+        .idx-group-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+        /* 数据过期提示 */
+        .val-stale { color: #f85149 !important; }
         
         .btn { 
             padding: 5px 12px; border: 1px solid #30363d; background: #21262d; color: #c9d1d9;
@@ -532,6 +537,7 @@
                                 <th class="pct-col"><span style="display:inline-block;width:125px;text-align:center;">PB 10年分位</span></th>
                                 <th>加权股息率</th>
                                 <th>成分股</th>
+                                <th>更新日期</th>
                             </tr>
                         </thead>
                         <tbody id="valuation-body"></tbody>
@@ -1031,16 +1037,25 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
 
             renderIndexFilter('filter-dashboard', 'dashboard');
             const trackNames = visibleNames('dashboard', indexNames.filter(n => !EXCLUDED_INDICES.includes(n)));
+            // 各行更新日期基准：指数数据日期与 ETF 行情日期分别取最新，落后的标红
+            const idxDatesAll = trackNames.map(n => (allData[n].dates || []).slice(-1)[0]).filter(Boolean).sort();
+            const maxIdxDate = idxDatesAll.length ? idxDatesAll[idxDatesAll.length - 1] : '';
+            const etfDatesAll = trackNames.map(n => (allData[n].etf || {}).price_date).filter(Boolean).sort();
+            const maxEtfDate = etfDatesAll.length ? etfDatesAll[etfDatesAll.length - 1] : '';
             trackNames.forEach((name, rowIdx) => {
                 const data = allData[name];
                 const scale = getEtfScale(data);
                 if (!scale) {
-                    rows += '<tr><td class="track-idx">' + name + '</td><td class="track-empty" colspan="9">未配置对应 ETF</td></tr>';
+                    rows += '<tr><td class="track-idx">' + name + '</td><td class="track-empty" colspan="10">未配置对应 ETF</td></tr>';
                     return;
                 }
                 const e = scale.etf;
                 if (e.price_date) priceDate = e.price_date;
                 if (e.index_date) indexDate = e.index_date;
+                const idxDate = e.index_date || '-';
+                const etfDate = e.price_date || '-';
+                const idxStale = idxDate !== '-' && maxIdxDate && idxDate < maxIdxDate;
+                const etfStale = etfDate !== '-' && maxEtfDate && etfDate < maxEtfDate;
 
                 const cells = pKeys.map(k => {
                     const arr = (data.percentiles || {})[k] || [];
@@ -1055,6 +1070,8 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
                 rows += '<tr onclick="showTracking(\'' + name + '\')" title="点击查看该 ETF 与全收益指数的收益跟踪对比">' +
                     '<td class="track-idx">' + name + '</td>' +
                     '<td><span class="track-code">' + e.code + '</span><span class="track-name">' + (e.name || '') + '</span></td>' +
+                    '<td><span class="' + (idxStale ? 'val-stale' : '') + '" style="font-size:12px;">指数 ' + idxDate + '</span>' +
+                    '<span class="track-sub' + (etfStale ? ' val-stale' : '') + '">ETF ' + etfDate + '</span></td>' +
                     '<td><span class="track-num">' + Number(e.price).toFixed(3) + '</span></td>' +
                     '<td><span class="track-dd">' + scale.curDd.toFixed(2) + '%</span></td>' +
                     '<td><span class="track-num" style="color:#8b949e">' + scale.peak.toFixed(3) + '</span><span class="track-sub">0.00%</span></td>' +
@@ -1065,7 +1082,7 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
             const head = pKeys.map(k => '<th style="color:' + pColors[k] + '">' + pShort[k] + '</th>').join('');
             body.innerHTML =
                 '<table class="track-table"><thead><tr>' +
-                '<th>跟踪指数（全收益）</th><th>场内 ETF</th><th>现价</th><th>当前回撤</th><th>前高对应价</th>' +
+                '<th>跟踪指数（全收益）</th><th>场内 ETF</th><th>更新日期</th><th>现价</th><th>当前回撤</th><th>前高对应价</th>' +
                 head +
                 '</tr></thead><tbody>' + rows + '</tbody></table>';
 
@@ -1438,10 +1455,16 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
                 return 'val-dy-lo';
             };
 
+            // 各行更新日期：以最新的为基准，落后的标红，便于发现未更新到的指数
+            const valDates = names.map(n => (allData[n] || {}).valuation).filter(Boolean).map(v => v.data_date).filter(Boolean).sort();
+            const maxValDate = valDates.length ? valDates[valDates.length - 1] : '';
+
             body.innerHTML = names.map(name => {
                 const v = (allData[name] || {}).valuation || null;
                 const dy = v ? v.dividend_yield : null;
                 const comp = (v && v.valid_count != null && v.component_count != null) ? `${v.valid_count}/${v.component_count}` : null;
+                const vdate = v ? (v.data_date || '') : '';
+                const stale = vdate && maxValDate && vdate < maxValDate;
                 return `<tr>
                     <td>${name}</td>
                     <td>${fmtNum(v ? v.pe_ttm : null, 2)}</td>
@@ -1450,6 +1473,7 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
                     <td>${fmtPct(v ? v.pb_percentile_10y : null)}</td>
                     <td class="${dyClass(dy)}">${dy === null || dy === undefined ? '<span class="val-na">—</span>' : Number(dy).toFixed(2) + '%'}</td>
                     <td>${comp ? comp : '<span class="val-na">—</span>'}</td>
+                    <td class="${stale ? 'val-stale' : ''}">${vdate || '<span class="val-na">—</span>'}</td>
                 </tr>`;
             }).join('');
 
@@ -1482,22 +1506,49 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
             }
         }
 
+        // 指数选择器分组：红利指数 / 其它（未列出的自动归入其它）
+        // 点击组名按钮可横向展开/收起该组的指数按钮；当前选中指数所在组的按钮会高亮
+        const DIVIDEND_GROUP = ['中证红利全收益', '智选高股息全收益', '红利低波全收益', '红利低波100全收益', 'A500红利低波全收益', '价值100全收益'];
+        const selectorGroupOpen = { '红利指数': true, '其它': true };
+
         function buildIndexSelector() {
             const selector = document.getElementById('index-selector');
             selector.innerHTML = '';
-            indexNames.forEach(name => {
-                const btn = document.createElement('button');
-                btn.className = 'btn' + (name === currentIndex ? ' active' : '');
-                btn.innerText = name;
-                btn.onclick = () => {
-                    currentIndex = name;
-                    document.querySelectorAll('#index-selector .btn').forEach(b => {
-                        if(indexNames.includes(b.innerText)) b.classList.remove('active');
-                    });
-                    btn.classList.add('active');
-                    updateUI();
+            const groups = [
+                { label: '红利指数', names: indexNames.filter(n => DIVIDEND_GROUP.includes(n)) },
+                { label: '其它', names: indexNames.filter(n => !DIVIDEND_GROUP.includes(n)) },
+            ];
+            groups.forEach(g => {
+                if (!g.names.length) return;
+                const row = document.createElement('div');
+                row.className = 'idx-group-row';
+                const open = selectorGroupOpen[g.label] !== false;
+                const gbtn = document.createElement('button');
+                gbtn.className = 'btn idx-group-btn' + (g.names.includes(currentIndex) ? ' active' : '');
+                gbtn.innerText = (open ? '▾ ' : '▸ ') + g.label;
+                gbtn.title = '点击展开/收起该分组的指数按钮';
+                gbtn.onclick = () => {
+                    selectorGroupOpen[g.label] = !open;
+                    buildIndexSelector();
                 };
-                selector.appendChild(btn);
+                row.appendChild(gbtn);
+                if (open) {
+                    g.names.forEach(name => {
+                        const btn = document.createElement('button');
+                        btn.className = 'btn' + (name === currentIndex ? ' active' : '');
+                        btn.innerText = name;
+                        btn.onclick = () => {
+                            currentIndex = name;
+                            document.querySelectorAll('#index-selector .btn').forEach(b => {
+                                if(indexNames.includes(b.innerText)) b.classList.remove('active');
+                            });
+                            btn.classList.add('active');
+                            updateUI();
+                        };
+                        row.appendChild(btn);
+                    });
+                }
+                selector.appendChild(row);
             });
         }
 
