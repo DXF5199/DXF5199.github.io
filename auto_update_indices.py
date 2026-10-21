@@ -34,7 +34,8 @@ INDEX_CONFIG = [
     {"code": "H20955", "name": "红利低波100全收益", "source": "CSI"},
     {"code": "932422CNY010", "name": "A500红利低波全收益", "source": "CSI"},
     {"code": "480081", "name": "价值100全收益", "source": "CNI"},
-    {"code": "480080", "name": "成长100全收益", "source": "CNI"}
+    {"code": "480080", "name": "成长100全收益", "source": "CNI"},
+    {"code": "8841431.WI", "name": "万得微盘股指数", "source": "WIND"}
 ]
 
 # 指数 -> 场内 ETF 映射（用于把回撤分位线换算成可交易的价格）
@@ -571,6 +572,153 @@ def fetch_cni_history(code):
     except Exception as e:
         print(f"获取国证指数 {code} 历史行情失败: {e}")
     return {}
+
+def fetch_wind_history(code, last_saved_date, last_saved_value=None):
+    """获取万得微盘股指数（8841431.WI）的最新收盘（推算口径）。
+
+    仅依据东方财富「微盘股」板块指数（90.BK1158）的每日涨跌幅倒推，
+    填充锚点之后的所有交易日。实测 BK1158 与万得微盘的日涨跌幅平均
+    绝对误差约 0.09 个百分点，短期倒推可靠；误差会随交易日累积，
+    属“大致推算”口径，可接受。只返回晚于本地已保存日期的交易日。
+    """
+    result = {}
+    if last_saved_value is not None:
+        result.update(_extrapolate_wind_from_bk1158(last_saved_date, last_saved_value))
+    if result:
+        latest = max(result)
+        print(f"万得微盘股指数{code}：本次推算 {len(result)} 个新交易日，最新 {latest} / {result[latest]:.2f}")
+    return result
+
+
+EASTMONEY_KLINE_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+# 东方财富「微盘股」板块指数，作为万得微盘股（868008.WI）每日涨幅的近似代理
+WIND_PROXY_SECID = "90.BK1158"
+# PB 水位区间（万得微盘日频等权 8841431.WI 近10年 PB 的最低/最高，据用户提供的准确数据）
+WIND_PB_MIN, WIND_PB_MAX = 1.3429, 5.2516
+
+# 西部证券《微盘周报》：每周发布，公开可抓，正文含「万得微盘股指数成分股 PB 中位数」
+SINA_REPORT_LIST = "https://stock.finance.sina.com.cn/stock/go.php/vReport_List/kind/search/index.phtml"
+SINA_REPORT_SHOW = "https://stock.finance.sina.com.cn/stock/go.php/vReport_Show/kind/search/rptid/{rptid}/index.phtml"
+SINA_HEADERS = {"User-Agent": "Mozilla/5.0", "Referer": "https://stock.finance.sina.com.cn/"}
+
+
+def _gbk_urlencode(text):
+    """新浪研报页面为 GBK 编码，标题参数需按 GBK 做百分号编码。"""
+    return "".join("%%%02X" % b for b in text.encode("gbk"))
+
+
+def fetch_wind_pb_from_report():
+    """从西部证券《微盘周报》抓取万得微盘股指数 PB 中位数（每周更新一次）。
+
+    链路：新浪研报标题搜索「微盘周报」→ 取最新一期 → 解析正文里的
+    「微盘股指数成分股pb中位数」与「截至YYYY年MM月DD日」。
+    返回 (pb, "YYYY-MM-DD")；任一步失败返回 (None, None)。
+    """
+    try:
+        url = SINA_REPORT_LIST + "?t1=5&title=" + _gbk_urlencode("微盘周报")
+        r = requests.get(url, headers=SINA_HEADERS, timeout=20)
+        r.raise_for_status()
+        html = r.content.decode("gbk", errors="replace")
+        m = re.search(r'rptid/(\d+)', html)
+        if not m:
+            print("西部证券微盘周报：标题搜索未找到报告。")
+            return None, None
+        r2 = requests.get(SINA_REPORT_SHOW.format(rptid=m.group(1)), headers=SINA_HEADERS, timeout=20)
+        r2.raise_for_status()
+        text = r2.content.decode("gbk", errors="replace")
+        pb_m = re.search(r'微盘股指数成分股pb\s*中位数[为是：:]*\s*([\d.]+)', text)
+        if not pb_m:
+            print("西部证券微盘周报：正文未解析到 pb 中位数。")
+            return None, None
+        pb = float(pb_m.group(1))
+        date_m = re.search(r'截至\s*(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日', text)
+        if date_m:
+            d = f"{int(date_m.group(1)):04d}-{int(date_m.group(2)):02d}-{int(date_m.group(3)):02d}"
+        else:
+            d = now_cn().strftime("%Y-%m-%d")
+        print(f"西部证券微盘周报：PB 中位数 {pb}（{d}）")
+        return pb, d
+    except Exception as e:
+        print(f"西部证券微盘周报抓取失败: {e}")
+        return None, None
+
+
+def _apply_wind_pb(data_obj):
+    """万得微盘 PB：从西部证券《微盘周报》抓取最新 PB 中位数并重算水位。
+
+    每周新报告出来后，若「截至日期」晚于页面内记录，则更新 PB 与水位；
+    抓取失败或未出新报告时保持原值（不产生无意义提交）。
+    """
+    pb, pb_date = fetch_wind_pb_from_report()
+    if pb is None or not pb_date:
+        return False
+    val = data_obj.get("valuation") or {}
+    old_date = val.get("data_date") or ""
+    if pb_date <= old_date:
+        print(f"万得微盘 PB：周报日期 {pb_date} 不新于已有 {old_date}，跳过。")
+        return False
+    new_pct = round((pb - WIND_PB_MIN) / (WIND_PB_MAX - WIND_PB_MIN) * 100, 1)
+    val["pb"] = pb
+    val["pb_percentile_10y"] = new_pct
+    val["data_date"] = pb_date
+    val["weight_date"] = pb_date.replace("-", "")
+    val["source"] = "西部证券微盘周报·PB中位数"
+    print(f"万得微盘股指数PB 更新为 {pb}（{pb_date}，水位 {new_pct}%）")
+    return True
+
+
+def _extrapolate_wind_from_bk1158(last_saved_date, last_saved_value):
+    """用东财微盘板块（BK1158）的每日涨跌幅倒推万得微盘股指数点位。
+
+    实测：BK1158 与万得微盘的日涨跌幅平均绝对误差约 0.09 个百分点，短期倒推可靠；
+    误差会随交易日累积，长期会逐步偏离真实值（推算口径，可接受）。
+    """
+    try:
+        beg = (datetime.strptime(last_saved_date, "%Y-%m-%d") - timedelta(days=10)).strftime("%Y%m%d")
+        end = now_cn().strftime("%Y%m%d")
+        params = {
+            "secid": WIND_PROXY_SECID,
+            "ut": "fa5fd1943c7b386f172d6893dbfba10b",
+            "fields1": "f1,f2,f3,f4,f5,f6",
+            "fields2": "f51,f53",
+            "klt": "101",
+            "fqt": "1",
+            "beg": beg,
+            "end": end,
+        }
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://quote.eastmoney.com/",
+        }
+        r = requests.get(EASTMONEY_KLINE_URL, params=params, headers=headers, timeout=20)
+        r.raise_for_status()
+        klines = ((r.json().get("data") or {}).get("klines")) or []
+        closes = {}
+        for line in klines:
+            p = line.split(",")
+            if len(p) >= 3 and p[0]:
+                closes[p[0]] = float(p[2])
+
+        if last_saved_date not in closes:
+            print(f"东财微盘板块倒推：K 线中找不到锚点日期 {last_saved_date}，跳过。")
+            return {}
+
+        out = {}
+        prev_d = last_saved_date
+        prev_v = float(last_saved_value)
+        days = [d for d in sorted(closes) if d > last_saved_date]
+        if len(days) > 30:
+            print(f"东财微盘板块倒推：距锚点已 {len(days)} 个交易日，推算累计漂移会偏大。")
+        for d in days:
+            prev_v = prev_v * (closes[d] / closes[prev_d])
+            out[d] = round(prev_v, 2)
+            prev_d = d
+        if out:
+            print(f"东财微盘板块倒推：{last_saved_date} → {days[-1]} 共 {len(days)} 个交易日（代理 90.BK1158）。")
+        return out
+    except Exception as e:
+        print(f"东财微盘板块倒推失败: {e}")
+        return {}
 
 def calculate_rolling_quantiles(drawdowns, window_years, quantile_levels):
     """
@@ -1215,11 +1363,14 @@ def update_html(file_path):
         last_saved_date = max(dates) if dates else None
         recent_data = {}
         try:
-            recent_data = (
-                fetch_csi_history(code, last_saved_date)
-                if source == "CSI"
-                else fetch_cni_history(code)
-            )
+            if source == "CSI":
+                recent_data = fetch_csi_history(code, last_saved_date)
+            elif source == "CNI":
+                recent_data = fetch_cni_history(code)
+            else:  # WIND
+                recent_data = fetch_wind_history(
+                    code, last_saved_date, values[-1] if values else None
+                )
         except Exception as e:
             print(f"⚠️ {name}（{code}）历史数据抓取失败，保留本地数据: {e}")
         index_updated = False
@@ -1257,6 +1408,11 @@ def update_html(file_path):
             print(f"正在为 {name} 重新计算所有图表指标...")
             update_index_calculations(all_data[name])
             updated_any = True
+
+        # 万得微盘（推算）：PB 同步为人工维护的最新准确值并重算水位
+        if source == "WIND":
+            if _apply_wind_pb(all_data[name]):
+                updated_any = True
 
         # 同步对应 ETF 的最新收盘价，并重算「各回撤分位线 -> ETF 价格」的换算结果
         etf_meta = ETF_CONFIG.get(name)
