@@ -607,13 +607,8 @@ def _gbk_urlencode(text):
     return "".join("%%%02X" % b for b in text.encode("gbk"))
 
 
-def fetch_wind_pb_from_report():
-    """从西部证券《微盘周报》抓取万得微盘股指数 PB 中位数（每周更新一次）。
-
-    链路：新浪研报标题搜索「微盘周报」→ 取最新一期 → 解析正文里的
-    「微盘股指数成分股pb中位数」与「截至YYYY年MM月DD日」。
-    返回 (pb, "YYYY-MM-DD")；任一步失败返回 (None, None)。
-    """
+def _fetch_latest_weekly_report_text():
+    """抓取最新一期西部证券《微盘周报》正文文本（GBK 已解码），失败返回 None。"""
     try:
         url = SINA_REPORT_LIST + "?t1=5&title=" + _gbk_urlencode("微盘周报")
         r = requests.get(url, headers=SINA_HEADERS, timeout=20)
@@ -622,25 +617,66 @@ def fetch_wind_pb_from_report():
         m = re.search(r'rptid/(\d+)', html)
         if not m:
             print("西部证券微盘周报：标题搜索未找到报告。")
-            return None, None
+            return None
         r2 = requests.get(SINA_REPORT_SHOW.format(rptid=m.group(1)), headers=SINA_HEADERS, timeout=20)
         r2.raise_for_status()
-        text = r2.content.decode("gbk", errors="replace")
-        pb_m = re.search(r'微盘股指数成分股pb\s*中位数[为是：:]*\s*([\d.]+)', text)
-        if not pb_m:
-            print("西部证券微盘周报：正文未解析到 pb 中位数。")
-            return None, None
-        pb = float(pb_m.group(1))
-        date_m = re.search(r'截至\s*(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日', text)
-        if date_m:
-            d = f"{int(date_m.group(1)):04d}-{int(date_m.group(2)):02d}-{int(date_m.group(3)):02d}"
-        else:
-            d = now_cn().strftime("%Y-%m-%d")
-        print(f"西部证券微盘周报：PB 中位数 {pb}（{d}）")
-        return pb, d
+        return r2.content.decode("gbk", errors="replace")
     except Exception as e:
         print(f"西部证券微盘周报抓取失败: {e}")
+        return None
+
+
+def _parse_report_date(text):
+    """解析周报正文里的「截至 YYYY 年 MM 月 DD 日」，失败返回 None。"""
+    m = re.search(r'截至\s*(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日', text)
+    if m:
+        return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+    return None
+
+
+def fetch_wind_pb_from_report():
+    """从西部证券《微盘周报》抓取万得微盘股指数 PB 中位数（每周更新一次）。
+
+    链路：新浪研报标题搜索「微盘周报」→ 取最新一期 → 解析正文里的
+    「微盘股指数成分股pb中位数」与「截至YYYY年MM月DD日」。
+    返回 (pb, "YYYY-MM-DD")；任一步失败返回 (None, None)。
+    """
+    text = _fetch_latest_weekly_report_text()
+    if not text:
         return None, None
+    pb_m = re.search(r'微盘股指数成分股pb\s*中位数[为是：:]*\s*([\d.]+)', text)
+    if not pb_m:
+        print("西部证券微盘周报：正文未解析到 pb 中位数。")
+        return None, None
+    pb = float(pb_m.group(1))
+    d = _parse_report_date(text) or now_cn().strftime("%Y-%m-%d")
+    print(f"西部证券微盘周报：PB 中位数 {pb}（{d}）")
+    return pb, d
+
+
+def fetch_wind_crowding_from_report():
+    """从西部证券《微盘周报》抓取 市值中位数 与 成交额占比（每周更新一次）。
+
+    返回 (mcap_median, turnover_share, "YYYY-MM-DD")；某项缺失时为 None；
+    任一步失败返回 (None, None, None)。
+    """
+    text = _fetch_latest_weekly_report_text()
+    if not text:
+        return None, None, None
+    d = _parse_report_date(text) or now_cn().strftime("%Y-%m-%d")
+    mcap = None
+    m1 = re.search(r'微盘股指数成分股总市值中位数[为是：:]*\s*([\d.]+)\s*亿元', text)
+    if m1:
+        mcap = float(m1.group(1))
+    turnover = None
+    m2 = re.search(r'微盘股成交占比\s*([\d.]+)\s*%', text)
+    if m2:
+        turnover = float(m2.group(1))
+    if mcap is None and turnover is None:
+        print("西部证券微盘周报：正文未解析到 市值中位数/成交占比。")
+        return None, None, None
+    print(f"西部证券微盘周报：市值中位数 {mcap} 亿元｜成交占比 {turnover}%（{d}）")
+    return mcap, turnover, d
 
 
 def _apply_wind_pb(data_obj):
@@ -664,7 +700,58 @@ def _apply_wind_pb(data_obj):
     val["weight_date"] = pb_date.replace("-", "")
     val["source"] = "西部证券微盘周报·PB中位数"
     print(f"万得微盘股指数PB 更新为 {pb}（{pb_date}，水位 {new_pct}%）")
+
+    # 同步把新一周的 PB 追加到周度序列（微盘股仪表盘的 PB 图用），并裁剪到近10年
+    pw = data_obj.get("pb_weekly")
+    if pw and pw.get("dates") and pb_date > pw["dates"][-1]:
+        if pb_date in data_obj["dates"]:
+            pt = data_obj["values"][data_obj["dates"].index(pb_date)]
+        else:
+            pt = data_obj["values"][-1]
+        pw["dates"].append(pb_date)
+        pw["pb"].append(pb)
+        pw["point"].append(pt)
+        cutoff = (pd.Timestamp(pw["dates"][-1]) - pd.DateOffset(years=10)).strftime("%Y-%m-%d")
+        while pw["dates"] and pw["dates"][0] < cutoff:
+            pw["dates"].pop(0)
+            pw["pb"].pop(0)
+            pw["point"].pop(0)
+        print(f"周度 PB 序列已追加 {pb_date}（现 {len(pw['dates'])} 周，起点 {pw['dates'][0]}）")
     return True
+
+
+def _apply_wind_crowding(data_obj):
+    """微盘股拥挤度：从西部证券《微盘周报》抓取 市值中位数 / 成交额占比，
+    追加到各自周度序列（滚动近10年窗口），供微盘股仪表盘使用。
+    """
+    mcap, turnover, d = fetch_wind_crowding_from_report()
+    if (mcap is None and turnover is None) or not d:
+        return False
+    changed = False
+    for key, val in (("mcap_median_weekly", mcap), ("turnover_weekly", turnover)):
+        if val is None:
+            continue
+        series = data_obj.get(key)
+        if not series or not series.get("dates"):
+            continue
+        if d > series["dates"][-1]:
+            series.setdefault("point", [])
+            # 取不超过该日期的最近交易日点位
+            prev_pts = [(dt, v) for dt, v in zip(data_obj["dates"], data_obj["values"]) if dt <= d]
+            pt = round(float(prev_pts[-1][1]), 2) if prev_pts else None
+            series["dates"].append(d)
+            series["value"].append(round(float(val), 4))
+            series["point"].append(pt)
+            cutoff = (pd.Timestamp(d) - pd.DateOffset(years=10)).strftime("%Y-%m-%d")
+            while series["dates"] and series["dates"][0] < cutoff:
+                series["dates"].pop(0)
+                series["value"].pop(0)
+                if series["point"]:
+                    series["point"].pop(0)
+            changed = True
+    if changed:
+        print(f"微盘股拥挤度周度序列已更新（{d}）")
+    return changed
 
 
 def _extrapolate_wind_from_bk1158(last_saved_date, last_saved_value):
@@ -1409,9 +1496,11 @@ def update_html(file_path):
             update_index_calculations(all_data[name])
             updated_any = True
 
-        # 万得微盘（推算）：PB 同步为人工维护的最新准确值并重算水位
+        # 万得微盘（推算）：PB 同步为西部证券周报最新准确值并重算水位
         if source == "WIND":
             if _apply_wind_pb(all_data[name]):
+                updated_any = True
+            if _apply_wind_crowding(all_data[name]):
                 updated_any = True
 
         # 同步对应 ETF 的最新收盘价，并重算「各回撤分位线 -> ETF 价格」的换算结果
