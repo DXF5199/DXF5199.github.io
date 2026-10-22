@@ -35,6 +35,7 @@ INDEX_CONFIG = [
     {"code": "932422CNY010", "name": "A500红利低波全收益", "source": "CSI"},
     {"code": "480081", "name": "价值100全收益", "source": "CNI"},
     {"code": "480080", "name": "成长100全收益", "source": "CNI"},
+    {"code": "H21187", "name": "中证科技100全收益", "source": "CSI"},
     {"code": "8841431.WI", "name": "万得微盘股指数", "source": "WIND"}
 ]
 
@@ -62,6 +63,7 @@ VALUATION_CONFIG = {
     "A500红利低波全收益": ("932422", "CSI"),
     "价值100全收益": ("480081", "CNI"),
     "成长100全收益": ("480080", "CNI"),
+    "中证科技100全收益": ("931187", "CSI"),
 }
 
 CSI_WEIGHT_URL = (
@@ -1398,6 +1400,74 @@ def append_history_entry(history, index_name, trade_date, pe, pb):
     return True
 
 
+# 红色火箭（华夏财富）估值历史接口：为无自建估值历史积累的指数提供 PE/PB 日频序列。
+# 接口 timeInterval=last_10_years 会返回指数发布日至今的全部历史（科技100 为 2019-05-30 起），
+# 不足 10 年时滚动分位自然退化为"全部已有数据"口径。
+RR_VALUATION_HISTORY = {"中证科技100全收益": "931187.CSI"}
+RR_VALUATION_URL = "https://www.hongsehuojian.com/fundex-quote/index/valuation"
+RR_HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Referer": "https://www.hongsehuojian.com/",
+}
+
+
+def fetch_rr_valuation_history(security_code):
+    """从红色火箭抓取指数 PE/PB 日频估值历史，返回 {"pe": {date: v}, "pb": {date: v}}。
+
+    接口每次返回全量序列（指数发布日至今），整体刷新即可同步历史修订。
+    """
+    out = {}
+    for vt, key in (("PE", "pe"), ("PB", "pb")):
+        try:
+            response = _request_with_retry(
+                RR_VALUATION_URL,
+                params={
+                    "securityCode": security_code,
+                    "valuationType": vt,
+                    "timeInterval": "last_10_years",
+                    "ts": int(now_cn().timestamp() * 1000),
+                },
+                headers=RR_HEADERS,
+                timeout=25,
+            )
+            payload = response.json()
+            items = (payload.get("data") or {}).get("items") or []
+            series = {}
+            for item in items:
+                raw = str(item.get("tradeDate", ""))
+                value = item.get("valuationValue")
+                if len(raw) == 8 and value is not None:
+                    series[f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}"] = float(value)
+            if series:
+                out[key] = series
+                print(f"红色火箭 {security_code} {vt}：获取 {len(series)} 条历史"
+                      f"（{min(series)} → {max(series)}）")
+        except (requests.RequestException, ValueError, TypeError) as e:
+            print(f"红色火箭 {security_code} {vt} 历史抓取失败: {e}")
+    return out
+
+
+def refresh_rr_valuation_history(pepb_history, index_name, security_code):
+    """用红色火箭全量历史重建该指数的估值历史序列，返回是否写入。"""
+    rr = fetch_rr_valuation_history(security_code)
+    pe_series, pb_series = rr.get("pe") or {}, rr.get("pb") or {}
+    if not pe_series or not pb_series:
+        return False
+    dates = sorted(set(pe_series) & set(pb_series))
+    if not dates:
+        return False
+    key = _history_sheet_name(index_name)
+    entry = {
+        "dates": dates,
+        "pe": [round(pe_series[d], 4) for d in dates],
+        "pb": [round(pb_series[d], 4) for d in dates],
+    }
+    if pepb_history.get(key) == entry:
+        return False
+    pepb_history[key] = entry
+    return True
+
+
 def percentile_in_10y(dates, values, current):
     """current 在近10年历史序列中的分位%（0~100，越高代表当前估值越贵）。
 
@@ -1599,6 +1669,13 @@ def update_html(file_path):
     # 指数估值（成分股权重加权）：PE-TTM / PB / 加权股息率，以及市值分布 / 行业分布
     pepb_history = load_pepb_history(content)  # 从 HTML 内嵌块加载历史序列
     history_changed = False
+
+    # 红色火箭估值历史指数：全量刷新 PE/PB 日频序列（含历史修订），供近10年分位计算
+    for rr_name, rr_code in RR_VALUATION_HISTORY.items():
+        if rr_name in all_data and refresh_rr_valuation_history(pepb_history, rr_name, rr_code):
+            history_changed = True
+            print(f"{rr_name} 已同步红色火箭估值历史至内嵌序列")
+
     for name, blocks in fetch_index_metrics().items():
         if name not in all_data:
             continue
