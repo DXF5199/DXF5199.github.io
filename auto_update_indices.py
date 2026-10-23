@@ -884,6 +884,10 @@ def find_points(prices, is_high=True, window=120):
         points.append((idx, np.log(val)))
     return points
 
+# 统计历次回撤时长时的最小跌幅门槛：峰→谷跌幅不足该值的回调视为噪音，不计入样本
+MIN_DD_PCT = 5.0
+
+
 def update_index_calculations(data_obj):
     values = data_obj["values"]
     prices = np.array(values)
@@ -896,39 +900,47 @@ def update_index_calculations(data_obj):
     data_obj["max_drawdown"] = round(float(np.min(drawdowns)), 2)
 
     # 1.1 回撤时长（单位：交易日）
-    # 最大回撤天数：近 10 年内，从「最高点」回撤到「最低点」所经历的交易日数。
-    # 取窗口内跌幅最深的那一段（即最大回撤对应的峰谷），2015 那种极端行情因超出窗口而自动排除。
+    # 回撤/修复天数中位数：近 10 年内所有「已完成的回撤轮次」的峰→谷、谷→峰时长。
+    # 轮次口径：谷底后成功突破前高，且峰→谷跌幅 ≥ MIN_DD_PCT（过滤 1-3 天的噪音波动，
+    # 否则大量微型回调会把中位数拉到无参考价值的 2 天左右）。
+    # 用中位数而非极值/均值：时长分布右偏严重（个别轮回拖数年），中位数更稳健，
+    # 代表"一轮回撤通常多久见底、多久修复"的常态水平；进行中的轮回不计入
+    #（其峰谷时长已单独展示在「已回撤天数 / 已回撤修复天数」卡片）。
     date_series = pd.to_datetime(data_obj["dates"])
     win_cutoff = date_series[-1] - pd.DateOffset(years=10)
     win_start = int(np.flatnonzero(date_series >= win_cutoff)[0]) if len(date_series) else 0
     win_prices = prices[win_start:]
-    win_running_max = np.maximum.accumulate(win_prices)
-    win_drawdowns = (win_prices / win_running_max - 1) * 100
-    trough_idx = int(np.argmin(win_drawdowns))            # 窗口内最低点
-    peak_idx = int(np.argmax(win_prices[:trough_idx + 1]))  # 该低点之前的最高点
-    data_obj["max_drawdown_days"] = int(trough_idx - peak_idx)
-
-    # 最大修复天数：近 10 年内，从「回撤最低点」涨回「前高」所经历的最长交易日数。
-    # 与上一项配对看：一次完整的峰谷循环 ≈ 最大回撤天数（峰→谷）+ 修复天数（谷→突破前高）。
-    repair_spans = []
+    dd_spans, repair_spans = [], []
     repair_peak = 0
     for i in range(1, len(win_prices)):
         if win_prices[i] >= win_prices[repair_peak]:
-            if i - repair_peak > 1:            # 中间确有回撤才算一轮修复
+            if i - repair_peak > 1:            # 中间确有回撤才算一轮轮回
                 segment = win_prices[repair_peak + 1: i]
                 trough_i = repair_peak + 1 + int(np.argmin(segment))
-                repair_spans.append(i - trough_i)
+                if (1 - win_prices[trough_i] / win_prices[repair_peak]) * 100 >= MIN_DD_PCT:
+                    dd_spans.append(trough_i - repair_peak)
+                    repair_spans.append(i - trough_i)
             repair_peak = i
-    data_obj["max_repair_days"] = int(max(repair_spans)) if repair_spans else 0
+    data_obj["median_drawdown_days"] = int(np.median(dd_spans)) if dd_spans else 0
+    data_obj["median_repair_days"] = int(np.median(repair_spans)) if repair_spans else 0
 
     data_obj.pop("max_recovery_days", None)   # 旧口径字段已废弃
     data_obj.pop("avg_recovery_days", None)
-    # 已回撤天数：从最近一次刷新历史新高，到最新交易日
+    # 已回撤天数 / 已回撤修复天数：当前这轮回撤的两段时长（交易日）。
+    # 峰 = 最近一次刷新历史新高的交易日；谷 = 峰后至今的最低点。
+    # 已回撤天数 = 峰→谷；已回撤修复天数 = 谷→最新交易日（尚未突破前高）。
+    # 最新点位已创新高（不在回撤中）时，两段均为 0。
     running_max = np.maximum.accumulate(prices)
     # 浮点精度保护：用微小容差避免漏判新高
     fresh_highs = np.flatnonzero(prices + 1e-6 >= running_max)
     last_peak_idx = int(fresh_highs[-1]) if len(fresh_highs) else 0
-    data_obj["current_drawdown_days"] = int(n_total - 1 - last_peak_idx)
+    if n_total - 1 > last_peak_idx:
+        cur_trough_idx = last_peak_idx + 1 + int(np.argmin(prices[last_peak_idx + 1:]))
+        data_obj["current_drawdown_days"] = int(cur_trough_idx - last_peak_idx)   # 峰→谷
+        data_obj["current_repair_days"] = int(n_total - 1 - cur_trough_idx)       # 谷→最新
+    else:
+        data_obj["current_drawdown_days"] = 0
+        data_obj["current_repair_days"] = 0
     
     # 2. 计算滚动分位线 (使用对齐 Excel 的新逻辑)
     q5 = calculate_rolling_quantiles(drawdowns, 5, [50, 70, 90])
@@ -1599,9 +1611,10 @@ def update_html(file_path):
             or len(all_data[name].get("reg_high", [])) != len(dates)
             or "regression_start_index" not in all_data[name]
             or all_data[name].get("regression_window_years") != 10
-            or "max_drawdown_days" not in all_data[name]
-            or "max_repair_days" not in all_data[name]
+            or "median_drawdown_days" not in all_data[name]
+            or "median_repair_days" not in all_data[name]
             or "current_drawdown_days" not in all_data[name]
+            or "current_repair_days" not in all_data[name]
         ):
             combined = sorted(zip(dates, values), key=lambda x: x[0])
             all_data[name]["dates"] = [x[0] for x in combined]
