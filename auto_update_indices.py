@@ -1582,9 +1582,15 @@ def update_html(file_path):
             elif source == "CNI":
                 recent_data = fetch_cni_history(code)
             else:  # WIND
-                recent_data = fetch_wind_history(
-                    code, last_saved_date, values[-1] if values else None
-                )
+                # 万得微盘为推算口径：固定锚点（准确数据最后一天）+ 代理指数最新收盘，
+                # 每次重推锚点之后的全部交易日并覆盖旧值。这样即便某次运行抓到了
+                # 代理源盘后未定稿的坏值，下次运行也会自动纠正，不会持续累积误差。
+                anchor = all_data[name].get("wind_anchor")
+                if not anchor:
+                    anchor = {"date": max(dates) if dates else None,
+                              "value": values[-1] if values else None}
+                    all_data[name]["wind_anchor"] = anchor
+                recent_data = fetch_wind_history(code, anchor["date"], anchor["value"])
         except Exception as e:
             print(f"⚠️ {name}（{code}）历史数据抓取失败，保留本地数据: {e}")
         index_updated = False
