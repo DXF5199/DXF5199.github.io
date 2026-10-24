@@ -1275,7 +1275,9 @@ const pepbHistory = {"中证红利": {"dates": ["2016-10-17", "2016-10-18", "201
         }
 
         // 基础统计（收益/年化/波动/回撤 + 三大比率）
-        function btStats(dates, nav, rfPct) {
+        // annualOverride: 定投模式下传入资金加权年化（XIRR）——净值口径的几何年化
+        // 会把"分批进场"误当作"一笔钱复利全程"，严重低估真实资金效率
+        function btStats(dates, nav, rfPct, annualOverride) {
             const n = dates.length;
             const dailyRet = [];
             for (let t = 1; t < n; t++) dailyRet.push(nav[t] / nav[t - 1] - 1);
@@ -1283,7 +1285,9 @@ const pepbHistory = {"中证红利": {"dates": ["2016-10-17", "2016-10-18", "201
             const variance = dailyRet.reduce((a, b) => a + (b - mean) * (b - mean), 0) / dailyRet.length;
             const vol = Math.sqrt(variance) * Math.sqrt(252);
             const totalRet = nav[n - 1] - 1;
-            const annual = (n >= 252) ? Math.pow(nav[n - 1], 252 / n) - 1 : totalRet;
+            const annual = (annualOverride != null)
+                ? annualOverride
+                : ((n >= 252) ? Math.pow(nav[n - 1], 252 / n) - 1 : totalRet);
             const dd = btDrawdown(nav);
             const maxDD = Math.min(...dd);
             const rf = rfPct / 100;
@@ -1295,6 +1299,34 @@ const pepbHistory = {"中证红利": {"dates": ["2016-10-17", "2016-10-18", "201
             const sortino = downVol > 0 ? (annual - rf) / downVol : 0;
             const calmar = maxDD < 0 ? (annual - rf) / Math.abs(maxDD) : 0;
             return { totalRet, annual, vol, maxDD, sharpe, sortino, calmar, dailyRet, dd };
+        }
+
+        // 定投模式的资金加权年化（XIRR）：现金流为每期投入 1 份、期末收回全部市值。
+        // 这是衡量"每份钱自身收益率"的正确口径；用二分法求解内部收益率。
+        function btXIRR(dates, nav, inflow) {
+            const n = dates.length;
+            let invested = 0;
+            for (let t = 0; t < n; t++) invested += inflow[t];
+            if (invested <= 0) return null;
+            const finalValue = nav[n - 1] * invested;
+            const t0 = new Date(dates[0]).getTime();
+            const dayOf = dt => Math.max(0, Math.round((new Date(dt).getTime() - t0) / 86400000));
+            function f(r) {
+                let s = 0;
+                for (let t = 0; t < n; t++) {
+                    if (inflow[t] > 0) s -= inflow[t] * Math.pow(1 + r, -dayOf(dates[t]) / 365);
+                }
+                s += finalValue * Math.pow(1 + r, -dayOf(dates[n - 1]) / 365);
+                return s;
+            }
+            let lo = -0.95, hi = 3;
+            let flo = f(lo), fhi = f(hi);
+            if (!isFinite(flo) || !isFinite(fhi) || flo * fhi > 0) return null;
+            for (let i = 0; i < 200; i++) {
+                const mid = (lo + hi) / 2, fm = f(mid);
+                if (flo * fm <= 0) { hi = mid; } else { lo = mid; flo = fm; }
+            }
+            return (lo + hi) / 2;
         }
 
         function runBacktest() {
@@ -1366,8 +1398,11 @@ const pepbHistory = {"中证红利": {"dates": ["2016-10-17", "2016-10-18", "201
             btHasRun = true;
             btReturnsData = { dates, nav, benchNav, benchName, maps, picks };
 
-            // 基础统计
-            const s = btStats(dates, nav, rfPct);
+            // 基础统计：定投模式下年化改用资金加权口径（XIRR），否则几何年化严重低估
+            let annualOverride = null;
+            if (btInvestMode === 'dca') annualOverride = btXIRR(dates, nav, inflow);
+            const s = btStats(dates, nav, rfPct, annualOverride);
+            const annualLabel = (btInvestMode === 'dca' && annualOverride != null) ? '年化(资金加权)' : '年化';
             const freqName = (btFreq === 'manual')
                 ? '手动择时×' + btManualRebalDates.length
                 : { monthly: '月平衡', quarterly: '季平衡', semiannual: '半年平衡', annual: '年平衡' }[btFreq];
@@ -1379,7 +1414,7 @@ const pepbHistory = {"中证红利": {"dates": ["2016-10-17", "2016-10-18", "201
             const costNote = costBp > 0 ? '｜<span style="color:#d29922;">调仓成本 ' + costBp + 'bp</span>' : '';
             statsEl.innerHTML = '区间 ' + dates[0] + ' ~ ' + dates[n - 1] + '｜' + investName + '｜' + freqName + manualWarn + normNote + costNote
                 + '<br>总收益 <b style="color:' + color + '">' + (s.totalRet >= 0 ? '+' : '') + (s.totalRet * 100).toFixed(2) + '%</b>｜'
-                + '年化 <b style="color:' + color + '">' + (s.annual >= 0 ? '+' : '') + (s.annual * 100).toFixed(2) + '%</b>｜'
+                + annualLabel + ' <b style="color:' + color + '">' + (s.annual >= 0 ? '+' : '') + (s.annual * 100).toFixed(2) + '%</b>｜'
                 + '最大回撤 <b style="color:#3fb950">' + (s.maxDD * 100).toFixed(2) + '%</b>｜'
                 + '年化波动 <b>' + (s.vol * 100).toFixed(2) + '%</b>'
                 + '<br>夏普比率 <b>' + s.sharpe.toFixed(2) + '</b>（rf ' + rfPct + '%）｜'
