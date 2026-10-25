@@ -666,16 +666,6 @@
             <div class="chart-box">
                 <div class="chart-header">
                     <div class="chart-title">对数比值 log(价值/成长)（近10年｜均值以上：价值风向｜以下：成长风向｜越出 P10/P90：风格极致期）</div>
-                    <div class="selector">
-                        <span style="font-size: 12px; color: #8b949e; margin-right: 4px;">比值图区间:</span>
-                        <button class="btn" onclick="setStyleLogZoomByMonths(3)">近3月</button>
-                        <button class="btn" onclick="setStyleLogZoomByMonths(6)">近6月</button>
-                        <button class="btn" onclick="setStyleLogZoomByMonths(12)">近1年</button>
-                        <button class="btn" onclick="setStyleLogZoomByMonths(36)">3年</button>
-                        <button class="btn" onclick="setStyleLogZoomByMonths(60)">5年</button>
-                        <button class="btn active" onclick="setStyleLogZoomByMonths(0)">全部</button>
-                        <button class="btn" id="btn-style-fine" onclick="toggleStyleFine()" title="在极致线之外追加 P75/P25 两条预警线，细分风格位置">细分线</button>
-                    </div>
                 </div>
                 <div class="ratio-chart-wrap">
                     <div id="chart-style-log"></div>
@@ -1025,14 +1015,6 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
         let styleCrowdChart = null;
         let styleVolChart = null;
         let styleDatesCache = [];
-        let styleFine = false;   // 细分模式：追加 P75/P25 预警线
-        function toggleStyleFine() {
-            styleFine = !styleFine;
-            const btn = document.getElementById('btn-style-fine');
-            if (btn) btn.classList.toggle('active', styleFine);
-            const data = buildStyleSeries();
-            if (data) renderStyleLogChart(data);
-        }
 
         window.onload = function() {
             // 早期版本曾支持“手动保存数据到浏览器”，现数据由 Action 直接写回 HTML，
@@ -3381,7 +3363,6 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
                 return s.length ? s[lo] + (s[hi] - s[lo]) * (idx - lo) : null;
             };
             const p90 = q(90), p10 = q(10);
-            const p75 = q(75), p25 = q(25);
             const expFmt = v => (v === null || v === undefined || !Number.isFinite(v)) ? '—' : Math.exp(v).toFixed(2);
 
             // 按对数均值分区：均值以上（价值风向）红、以下（成长风向）蓝，面积以均值线为填充边界
@@ -3398,9 +3379,7 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
             const refLegendEl = document.getElementById('ratio-ref-legend');
             if (refLegendEl) {
                 const refItems = [{ name: '价值极致 P90', value: expFmt(p90), color: '#f85149' }];
-                if (styleFine) refItems.push({ name: '价值预警 P75', value: expFmt(p75), color: '#f8a58c' });
                 refItems.push({ name: '风格基准线', value: expFmt(mean), color: '#c9d1d9' });
-                if (styleFine) refItems.push({ name: '成长预警 P25', value: expFmt(p25), color: '#8ec8f8' });
                 refItems.push({ name: '成长极致 P10', value: expFmt(p10), color: '#58a6ff' });
                 refLegendEl.innerHTML = refItems.map(item =>
                     '<div class="rrl-row">'
@@ -3436,12 +3415,8 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
                         let extreme = '';
                         if (p90 !== null && val >= p90) {
                             extreme = ' <span style="color:#ff7b72;font-weight:700">⚡价值极致</span>';
-                        } else if (styleFine && p75 !== null && val >= p75) {
-                            extreme = ' <span style="color:#f85149;font-weight:700">价值偏热</span>';
                         } else if (p10 !== null && val <= p10) {
                             extreme = ' <span style="color:#79c0ff;font-weight:700">⚡成长极致</span>';
-                        } else if (styleFine && p25 !== null && val <= p25) {
-                            extreme = ' <span style="color:#58a6ff;font-weight:700">成长偏冷</span>';
                         }
                         res += '<div style="display:flex;justify-content:space-between;gap:18px;"><span>'
                             + hit.marker + '价值/成长比值</span><b>' + ratio.toFixed(2) + dev + ' ' + wind + extreme + '</b></div>';
@@ -3475,8 +3450,6 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
                             data: [
                                 { yAxis: mean, label: { show: false }, lineStyle: { type: 'dashed', color: '#c9d1d9', width: 2, opacity: 0.75 } },
                                 { yAxis: p90, label: { show: false }, lineStyle: { type: 'dashed', color: 'rgba(248,81,73,0.85)', width: 1.6 } },
-                                ...(styleFine ? [{ yAxis: p75, label: { show: false }, lineStyle: { type: 'dashed', color: 'rgba(248,81,73,0.25)', width: 1 } }] : []),
-                                ...(styleFine ? [{ yAxis: p25, label: { show: false }, lineStyle: { type: 'dashed', color: 'rgba(88,166,255,0.25)', width: 1 } }] : []),
                                 { yAxis: p10, label: { show: false }, lineStyle: { type: 'dashed', color: 'rgba(88,166,255,0.85)', width: 1.6 } }
                             ]
                         }
@@ -3663,20 +3636,6 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
             let startIndex = 0;
             for (let i = 0; i < total; i++) { if (new Date(styleDatesCache[i]) >= target) { startIndex = i; break; } }
             styleCrowdChart.dispatchAction({ type: 'dataZoom', start: (startIndex / total) * 100, end: 100 });
-        }
-
-        function setStyleLogZoomByMonths(months) {
-            const btn = event.target;
-            btn.parentElement.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
-            btn.classList.add('active');
-            const total = styleDatesCache.length;
-            if (!total) return;
-            if (months === 0) { styleLogChart.dispatchAction({ type: 'dataZoom', start: 0, end: 100 }); return; }
-            const last = new Date(styleDatesCache[total - 1]);
-            const target = new Date(last.setMonth(last.getMonth() - months));
-            let startIndex = 0;
-            for (let i = 0; i < total; i++) { if (new Date(styleDatesCache[i]) >= target) { startIndex = i; break; } }
-            styleLogChart.dispatchAction({ type: 'dataZoom', start: (startIndex / total) * 100, end: 100 });
         }
 
         window.addEventListener('resize', () => {
