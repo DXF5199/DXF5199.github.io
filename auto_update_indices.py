@@ -37,6 +37,11 @@ INDEX_CONFIG = [
     {"code": "480080", "name": "成长100全收益", "source": "CNI"},
     {"code": "H21187", "name": "中证科技100全收益", "source": "CSI"},
     {"code": "8841431.WI", "name": "万得微盘股指数", "source": "WIND"},
+    # 标普中国A股大盘红利低波50指数（总收益）：官网有 Akamai 防护无法程序化抓取。
+    # 平时按跟踪 ETF（515450）累计净值的日频涨跌幅推算；ypingcn.com 内嵌与官网
+    # 一致的周频官方点位，每周自动校正一次（清除官方末点之后的推算日频点，
+    # 只保留官方周频数据），保证推算漂移每周归零。
+    {"code": "SPCNALV50TR", "name": "标普红利低波50全收益", "source": "SP"},
     # 回测工具的比较基准：仅用于回测对照，不展示在画像/估值等模块
     {"code": "H00300", "name": "沪深300全收益", "source": "CSI", "benchmark_only": True}
 ]
@@ -51,6 +56,7 @@ ETF_CONFIG = {
     "红利低波100全收益":  {"code": "159307", "market": "sz", "name": "红利低波100ETF博时"},
     "A500红利低波全收益": {"code": "563510", "market": "sh", "name": "A500红利低波ETF易方达"},
     "价值100全收益":      {"code": "159263", "market": "sz", "name": "价值ETF易方达"},
+    "标普红利低波50全收益": {"code": "515450", "market": "sh", "name": "红利低波50ETF南方"},
 }
 
 # 指数估值（成分股权重加权）
@@ -66,6 +72,10 @@ VALUATION_CONFIG = {
     "价值100全收益": ("480081", "CNI"),
     "成长100全收益": ("480080", "CNI"),
     "中证科技100全收益": ("931187", "CSI"),
+    # 标普指数不公开成分股权重（需 SPICE 账号），用跟踪 ETF（515450）的
+    # 中报/年报全持仓近似（≈指数成分股，滞后一个报告期）；行业分布无
+    # 可靠申万个股映射源，留空。
+    "标普红利低波50全收益": ("515450", "SP"),
 }
 
 CSI_WEIGHT_URL = (
@@ -605,6 +615,160 @@ def fetch_cni_history(code):
         print(f"获取国证指数 {code} 历史行情失败: {e}")
     return {}
 
+# 标普指数（SP 源）：官网有 Akamai 防护无法程序化抓取，更新策略分两层：
+#   1) 平时：用跟踪 ETF（红利低波50ETF南方 515450）的「累计净值」日收益推算
+#      （fund.eastmoney.com 可直接抓取，无 IP 限制）。实测 2020 年以来与官方
+#      TR 日收益相关系数 0.981、日均绝对误差约 0.08 个百分点（与万得微盘的
+#      东财代理同量级）；误差随交易日累积（累计净值未按再投资复利计息）。
+#   2) 每周：ypingcn.com 内嵌与 S&P 官网一致的周频官方点位，自动校正一次——
+#      清除官方末点之后的推算日频点、只保留官方周频数据，再从最新官方点
+#      重新推算至今，使推算漂移每周归零。
+SP_PROXY_FUND_CODE = "515450"
+# ypingcn.com：第三方指数站，点位与 S&P 官网一致（周频采样内嵌于页面）
+YPINGCN_URL = "https://ypingcn.com/index-detail/SPCLLHCT/"
+
+
+def _fetch_sp_proxy_nav():
+    """抓取跟踪 ETF（515450）的累计净值序列，返回 {YYYY-MM-DD: 累计净值}。
+
+    时间戳为毫秒，按东八区日界取日期（取 UTC+8，否则日界错位一天）。
+    累计净值 = 单位净值 + 历史累计分红，其日变化 ≈ 全收益日收益（含分红）。
+    """
+    url = f"https://fund.eastmoney.com/pingzhongdata/{SP_PROXY_FUND_CODE}.js"
+    r = _request_with_retry(url, timeout=20, headers={
+        "User-Agent": TENCENT_HEADERS["User-Agent"],
+        "Referer": f"https://fund.eastmoney.com/{SP_PROXY_FUND_CODE}.html",
+    })
+    match = re.search(r"Data_ACWorthTrend\s*=\s*(\[.*?\]);", r.text)
+    if not match:
+        raise ValueError(f"{SP_PROXY_FUND_CODE} 净值数据解析失败（Data_ACWorthTrend 缺失）")
+    tz_cn = timezone(timedelta(hours=8))
+    out = {}
+    for t, v in json.loads(match.group(1)):
+        d = datetime.fromtimestamp(t / 1000, tz_cn).strftime("%Y-%m-%d")
+        out[d] = float(v)
+    return out
+
+
+def _extrapolate_sp_from_fund(last_saved_date, last_saved_value):
+    """用 515450 累计净值倒推标普指数总收益点位（仅锚点之后的交易日）。
+
+    换算：TR[d] = TR[锚点] × 累计净值[d] / 累计净值[锚点]，即以锚点日
+    官方点位定基、用基金累计净值日收益滚动外推。
+    """
+    if last_saved_value is None:
+        return {}
+    nav = _fetch_sp_proxy_nav()
+    anchor = last_saved_date
+    if anchor not in nav:
+        earlier = [d for d in nav if d < anchor]
+        if not earlier:
+            print(f"标普指数倒推：515450 净值序列早于锚点 {last_saved_date} 无数据，跳过。")
+            return {}
+        anchor = max(earlier)
+        print(f"标普指数倒推：净值序列无 {last_saved_date}，锚点前移至 {anchor}（累计净值比例换算）。")
+    base = float(last_saved_value) / nav[anchor]
+    out = {d: round(base * v, 2) for d, v in nav.items() if d > anchor}
+    if out:
+        latest = max(out)
+        print(f"标普指数倒推（{SP_PROXY_FUND_CODE} 累计净值）：{last_saved_date} → {latest} 共 {len(out)} 个交易日。")
+    return out
+
+
+def _fetch_sp_official_weekly():
+    """抓取 ypingcn.com 指数页内嵌的官方周频全收益点位。
+
+    该站为 Next.js SSR，点位内嵌在 RSC payload 的 initialData.chart_series
+    中（约每周 1 个采样点，数据与 S&P 官网一致，起点 2016-09-30）。
+    返回 {YYYY-MM-DD: 点位}；抓取/解析失败时抛异常，由调用方容错。
+    """
+    r = _request_with_retry(YPINGCN_URL, timeout=25, headers={
+        "User-Agent": TENCENT_HEADERS["User-Agent"],
+    })
+    chunks = re.findall(r'self\.__next_f\.push\(\[1,"((?:[^"\\]|\\.)*)"\]\)', r.text)
+    if not chunks:
+        raise ValueError("ypingcn 页面未找到 RSC payload（页面结构可能已变化）")
+    text = "".join(c.encode().decode("unicode_escape") for c in chunks)
+    # 括号配对提取 initialData 的 JSON
+    i = text.find("initialData")
+    start = text.find("{", i)
+    depth, j, in_str, esc = 0, start, False, False
+    while j < len(text):
+        ch = text[j]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        else:
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+        j += 1
+    obj = json.loads(text[start:j + 1])
+    series = (obj.get("all") or {}).get("chart_series") or {}
+    dates, prices = series.get("dates") or [], series.get("prices") or []
+    if not dates or len(dates) != len(prices):
+        raise ValueError("ypingcn chart_series 解析失败（dates/prices 缺失或不等长）")
+    return {d: float(v) for d, v in zip(dates, prices)}
+
+
+def fetch_sp_weights():
+    """从天天基金 jjcc 接口解析跟踪 ETF（515450）最新一期「全持仓」明细。
+
+    季报只披露前十大，中报/年报为全持仓（50 只 ≈ 指数成分股），
+    取股票数最多的报告期。返回 ([(symbol, 名称, 权重%, None)], 权重日期)。
+    """
+    url = (
+        "https://fundf10.eastmoney.com/FundArchivesDatas.aspx"
+        f"?type=jjcc&code={SP_PROXY_FUND_CODE}&topline=100"
+    )
+    r = _request_with_retry(url, timeout=20, headers={
+        "User-Agent": TENCENT_HEADERS["User-Agent"],
+        "Referer": f"https://fundf10.eastmoney.com/ccmx_{SP_PROXY_FUND_CODE}.html",
+    })
+    r.encoding = "utf-8"
+    match = re.search(r'content:"(.*?)"\s*,\s*arryear:', r.text, re.DOTALL)
+    if not match:
+        raise ValueError("515450 持仓接口解析失败（apidata.content 缺失）")
+    content = match.group(1).replace('\\"', '"')
+
+    best = None  # (权重日期, rows, 行数)
+    for block in re.split(r"<div class='boxitem", content)[1:]:
+        dm = re.search(r"截止至：<font class='px12'>(\d{4}-\d{2}-\d{2})</font>", block)
+        if not dm:
+            continue
+        rows_b = []
+        for tr in re.finditer(r"<tr>(.*?)</tr>", block, re.S):
+            cell = tr.group(1)
+            cm = re.search(r"unify/r/([01])\.(\d{6})", cell)
+            nm = re.search(r"<td class='tol'><a[^>]*>([^<]+)</a>", cell)
+            wm = re.search(r"<td class='tor'>([\d.]+)%</td>", cell)
+            if not (cm and nm and wm):
+                continue
+            weight = float(wm.group(1))
+            # 剔除零权重持仓：ETF 中报/年报会残留调样过渡期已基本清仓的
+            # 尾仓（实测 22 只合计权重 0.00%），不属于指数成分股，
+            # 计入会污染成分股计数与整体法 PE/PB
+            if weight <= 0:
+                continue
+            exchange = {"1": "sh", "0": "sz"}.get(cm.group(1), "bj")
+            rows_b.append((exchange + cm.group(2), nm.group(1), weight, None))
+        if rows_b and (best is None or len(rows_b) > best[2]):
+            best = (dm.group(1), rows_b, len(rows_b))
+    if not best or best[2] < 30:
+        raise ValueError("未找到 515450 全持仓报告期（中报/年报尚未披露）")
+    print(f"标普指数画像：使用 {SP_PROXY_FUND_CODE} 全持仓 {best[2]} 只（权重日 {best[0]}，滞后一个报告期）。")
+    return best[1], best[0]
+
+
 def fetch_wind_history(code, last_saved_date, last_saved_value=None):
     """获取万得微盘股指数（8841431.WI）的最新收盘（推算口径）。
 
@@ -981,15 +1145,16 @@ def update_index_calculations(data_obj):
     
     # 2. 计算滚动分位线 (使用对齐 Excel 的新逻辑)
     q5 = calculate_rolling_quantiles(drawdowns, 5, [50, 70, 90])
-    q10 = calculate_rolling_quantiles(drawdowns, 10, [50, 70])
-    
+    q10 = calculate_rolling_quantiles(drawdowns, 10, [50, 70, 90])
+
     # 修正 HTML 字段名映射: 网页 JS 查找的是 'percentiles'
     data_obj["percentiles"] = {
         "滚动五年50%分位": q5[50],
         "滚动五年70%分位": q5[70],
         "滚动五年90%分位": q5[90],
         "滚动十年50%分位": q10[50],
-        "滚动十年70%分位": q10[70]
+        "滚动十年70%分位": q10[70],
+        "滚动十年90%分位": q10[90]
     }
     
     # 3. 对数回归通道：严格使用“最新交易日向前滚动10个日历年”的样本。
@@ -1399,7 +1564,7 @@ def build_valuation_block(rows, quotes, weight_date, source="CSI"):
         "weight_date": weight_date,
         # 个股行情所属交易日：估值数据本身的日期
         "data_date": _normalize_date(max(quote_dates)) if quote_dates else weight_date,
-        "source": "中证指数官网" if source == "CSI" else "国证指数官网",
+        "source": {"CSI": "中证指数官网", "CNI": "国证指数官网"}.get(source, "天天基金·ETF全持仓"),
         "component_count": len(rows),
         "valid_count": valid_dy,
         "updated_at": now_cn().strftime("%Y-%m-%d %H:%M:%S"),
@@ -1478,9 +1643,13 @@ def fetch_index_metrics():
     result = {}
     for name, (code, source) in VALUATION_CONFIG.items():
         try:
-            rows, weight_date = (
-                fetch_cni_weights(code) if source == "CNI" else fetch_csi_weights(code)
-            )
+            if source == "SP":
+                # 标普指数：无公开成分股文件，用跟踪 ETF 全持仓近似
+                rows, weight_date = fetch_sp_weights()
+            else:
+                rows, weight_date = (
+                    fetch_cni_weights(code) if source == "CNI" else fetch_csi_weights(code)
+                )
             quotes = fetch_stock_quotes([row[0] for row in rows])
         except Exception as e:  # 第三方文件结构变化不应中断整体更新
             print(f"⚠️ {name} 成分股数据抓取失败: {e}")
@@ -1564,6 +1733,57 @@ def update_html(file_path):
                 recent_data = fetch_csi_history(code, last_saved_date)
             elif source == "CNI":
                 recent_data = fetch_cni_history(code)
+            elif source == "SP":
+                # 标普指数：平时按 515450 累计净值日频推算；每周用 ypingcn 的
+                # 官方周频点位校正——清除官方末点之后的推算日频点、只保留官方
+                # 周频数据，再从最新官方点重新推算至今（漂移每周归零）。
+                try:
+                    official = _fetch_sp_official_weekly()
+                except Exception as e:
+                    official = {}
+                    # 失效标记写入 HTML：前端在指数页面展示提醒（用户不看 Actions 日志也能发现）
+                    err_today = now_cn().strftime("%Y-%m-%d")
+                    prev_err = all_data[name].get("sp_official_error")
+                    if not prev_err or prev_err.get("date") != err_today:
+                        all_data[name]["sp_official_error"] = {"date": err_today, "msg": str(e)[:200]}
+                        updated_any = True
+                    print(f"⚠️ 标普指数 ypingcn 官方周频抓取失败（本次全部按推算处理）: {e}")
+                else:
+                    # 恢复后自动清除失效标记
+                    if all_data[name].pop("sp_official_error", None) is not None:
+                        updated_any = True
+                        print("标普指数：ypingcn 官方周频校正已恢复，失效标记已清除。")
+                official_end = (
+                    all_data[name].get("sp_official_end")
+                    or (max(dates) if dates else None)
+                )
+                # 清除官方数据末点之后的推算日频点
+                drop = [i for i, d in enumerate(dates) if official_end and d > official_end]
+                if drop:
+                    keep = set(range(len(dates))) - set(drop)
+                    dates = [dates[i] for i in sorted(keep)]
+                    values = [values[i] for i in sorted(keep)]
+                    print(f"标普指数：清除官方末点 {official_end} 之后的 {len(drop)} 个推算日频点。")
+                # 官方周频点就地覆盖/追加（只处理晚于官方末点的新周点）
+                if official:
+                    for d, v in sorted(official.items()):
+                        if d > official_end:
+                            if d in dates:
+                                values[dates.index(d)] = v
+                            else:
+                                dates.append(d)
+                                values.append(v)
+                    # 官方末点只增不减：即使本次无新周点也落盘，
+                    # 防止个别运行抓取失败后误把官方历史日频当推算点清除
+                    prev_end = all_data[name].get("sp_official_end")
+                    all_data[name]["sp_official_end"] = max(
+                        max(official), prev_end or "")
+                    print(f"标普指数：官方周频数据校正至 {all_data[name]['sp_official_end']}。")
+                all_data[name]["dates"] = dates
+                all_data[name]["values"] = values
+                # 从最新末点（官方周点或官方历史末点）起重新推算日频
+                recent_data = _extrapolate_sp_from_fund(
+                    max(dates) if dates else None, values[-1] if values else None)
             else:  # WIND
                 # 万得微盘为推算口径：固定锚点（准确数据最后一天）+ 代理指数最新收盘，
                 # 每次重推锚点之后的全部交易日并覆盖旧值。这样即便某次运行抓到了
@@ -1604,6 +1824,7 @@ def update_html(file_path):
             or "median_repair_days" not in all_data[name]
             or "current_drawdown_days" not in all_data[name]
             or "current_repair_days" not in all_data[name]
+            or "滚动十年90%分位" not in (all_data[name].get("percentiles") or {})
         ):
             combined = sorted(zip(dates, values), key=lambda x: x[0])
             all_data[name]["dates"] = [x[0] for x in combined]
