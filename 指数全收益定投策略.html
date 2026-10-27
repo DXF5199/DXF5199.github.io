@@ -1,7 +1,11 @@
 <html lang="zh-CN"><head>
     <meta charset="UTF-8">
     <title>全收益指数分析工具</title>
-    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+    <!-- ECharts 按优先级从国内可达源加载（jsdelivr 在国内经常 403/超时，是页面打开慢的主因之一）；
+         document.write 保证串行同步加载，主脚本执行时 echarts 必已就绪 -->
+    <script src="https://registry.npmmirror.com/echarts/5.4.3/files/dist/echarts.min.js"></script>
+    <script>window.echarts || document.write('<script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"><\/script>')</script>
+    <script>window.echarts || document.write('<script src="https://unpkg.com/echarts@5.4.3/dist/echarts.min.js"><\/script>')</script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { 
@@ -625,7 +629,7 @@
         <div id="page-dashboard" class="page-content">
             <div class="dashboard-heading">
                 <h2>红利指数估值仪表盘</h2>
-                <p>每个指数一行、左右两张图：左侧为近3个月回撤与滚动5年、10年风险分位线，右侧为近3年对数回归估值通道（拟合窗口仍为近10年，纵轴按数据范围自适应）；数据直接读取当前页面的指数数据与派生指标。</p>
+                <p>每个指数一行、左右两张图：左侧为近6个月回撤与滚动5年、10年风险分位线，右侧为近3年对数回归估值通道（拟合窗口仍为近10年，纵轴按数据范围自适应）；数据直接读取当前页面的指数数据与派生指标。</p>
             </div>
             <div class="view-switch">
                 <button class="btn active" id="btn-view-valuation" onclick="switchDashboardView('valuation')">📈 估值仪表盘</button>
@@ -888,6 +892,7 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
         // 成分股画像的行业环形图按需初始化（容器在画像视图内）
         let industryChart = null;
         let dashboardCharts = {};
+        let dashboardSig = '';   // 当前已渲染的指数集合签名：相同则复用图表实例，避免重复 dispose/init 造成卡顿
         // 成长100全收益仅用于分析工作台与价值&成长仪表盘，不参与估值仪表盘与指数基金跟踪
         // 万得微盘股指数不参与价值&成长仪表盘、指数基金跟踪（无 ETF / 成份股画像数据）
         // 中证科技100全收益无对应 ETF，不参与价值&成长仪表盘与指数基金跟踪
@@ -1551,13 +1556,13 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
                 series: [
                     {
                         name: '组合净值', type: 'line', data: nav.map(v => Math.round(v * 10000) / 10000),
-                        showSymbol: false, lineStyle: { width: 2, color: '#f85149' },
+                        sampling: 'lttb', showSymbol: false, lineStyle: { width: 2, color: '#f85149' },
                         areaStyle: { color: 'rgba(248,81,73,0.08)' }
                     },
                     {
                         name: benchName, type: 'line',
                         data: benchNav.map(v => v === null ? null : Math.round(v * 10000) / 10000),
-                        showSymbol: false, lineStyle: { width: 1.5, type: 'dashed', color: '#58a6ff' }
+                        sampling: 'lttb', showSymbol: false, lineStyle: { width: 1.5, type: 'dashed', color: '#58a6ff' }
                     }
                 ]
             }, true);
@@ -1972,11 +1977,11 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
             crowdingCharts[key].resize();
         }
 
-        function getThreeMonthStartIndex(dates) {
+        function getSixMonthStartIndex(dates) {
             if (!dates || dates.length === 0) return 0;
             const lastDate = new Date(dates[dates.length - 1] + 'T00:00:00');
             const targetDate = new Date(lastDate);
-            targetDate.setMonth(targetDate.getMonth() - 3);
+            targetDate.setMonth(targetDate.getMonth() - 6);
             const index = dates.findIndex(date => new Date(date + 'T00:00:00') >= targetDate);
             return index === -1 ? 0 : index;
         }
@@ -2007,17 +2012,25 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
             const meta = document.getElementById('dashboard-meta');
             if (!grid || indexNames.length === 0) return;
 
-            Object.values(dashboardCharts).forEach(chart => {
-                if (chart && !chart.isDisposed()) chart.dispose();
-            });
-            dashboardCharts = {};
-            grid.innerHTML = '';
-
             renderIndexFilter('filter-dashboard', 'dashboard');
             const dashNames = visibleNames('dashboard', indexNames.filter(n => !EXCLUDED_INDICES.includes(n)));
+            // 同一批指数重复渲染（筛选开关、切页返回）时复用已建好的图表实例：
+            // 12 个 ECharts 实例 dispose/init 重建是仪表盘页最大的点击卡顿来源；
+            // 运行期间 allData 不会变化，复用是安全的
+            const sig = dashNames.join('|');
+            const reuse = dashboardSig === sig && grid.children.length === dashNames.length
+                && Object.keys(dashboardCharts).length === dashNames.length * 2;
+            if (!reuse) {
+                Object.values(dashboardCharts).forEach(chart => {
+                    if (chart && !chart.isDisposed()) chart.dispose();
+                });
+                dashboardCharts = {};
+                grid.innerHTML = '';
+            }
+            dashboardSig = sig;
             const dates = dashNames.map(name => allData[name].dates.at(-1)).filter(Boolean);
             meta.innerHTML = spOfficialWarn()
-                + `已覆盖 ${dashNames.length} 个指数｜数据最新日期：${dates.sort().at(-1) || '-'}｜左侧近3个月回撤，右侧近3年对数回归估值通道`;
+                + `已覆盖 ${dashNames.length} 个指数｜数据最新日期：${dates.sort().at(-1) || '-'}｜左侧近6个月回撤，右侧近3年对数回归估值通道`;
 
             const pColors = {
                 '滚动五年50%分位': '#3fb950',
@@ -2030,7 +2043,7 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
 
             dashNames.forEach((name, chartIndex) => {
                 const data = allData[name];
-                const startIndex = getThreeMonthStartIndex(data.dates);
+                const startIndex = getSixMonthStartIndex(data.dates);
                 const dates3m = data.dates.slice(startIndex);
                 const drawdowns3m = data.drawdowns.slice(startIndex);
                 const latestDd = drawdowns3m.at(-1);
@@ -2038,29 +2051,31 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
                 // 当前这轮已回撤天数
                 const currRec = data.current_drawdown_days;
                 const currRecText = (currRec === undefined || currRec === null) ? '—' : currRec + ' 天';
-                const card = document.createElement('section');
-                card.className = 'dashboard-card';
-                card.innerHTML = `
-                    <div class="dashboard-card-header">
-                        <div class="dashboard-card-title">${name}</div>
-                        <div class="dashboard-card-status">
-                            <span class="label">${latestDate} 当前回撤</span>
-                            <span class="value">${Number.isFinite(latestDd) ? latestDd.toFixed(2) + '%' : '-'}</span>
-                            <span class="dd-extra">已回撤 <b>${currRecText}</b>（峰→谷，交易日）</span>
+                if (!reuse) {
+                    const card = document.createElement('section');
+                    card.className = 'dashboard-card';
+                    card.innerHTML = `
+                        <div class="dashboard-card-header">
+                            <div class="dashboard-card-title">${name}</div>
+                            <div class="dashboard-card-status">
+                                <span class="label">${latestDate} 当前回撤</span>
+                                <span class="value">${Number.isFinite(latestDd) ? latestDd.toFixed(2) + '%' : '-'}</span>
+                                <span class="dd-extra">已回撤 <b>${currRecText}</b>（峰→谷，交易日）</span>
+                            </div>
                         </div>
-                    </div>
-                    <div class="dashboard-charts">
-                        <div class="dashboard-chart-block">
-                            <div class="dashboard-subtitle"><span class="dot dd"></span>回撤与风险分位线（近3个月）</div>
-                            <div id="dashboard-dd-${chartIndex}" class="dashboard-chart"></div>
+                        <div class="dashboard-charts">
+                            <div class="dashboard-chart-block">
+                                <div class="dashboard-subtitle"><span class="dot dd"></span>回撤与风险分位线（近6个月）</div>
+                                <div id="dashboard-dd-${chartIndex}" class="dashboard-chart"></div>
+                            </div>
+                            <div class="dashboard-chart-block">
+                                <div class="dashboard-subtitle"><span class="dot reg"></span>对数回归估值通道（近3年，拟合窗口仍为近10年）</div>
+                                <div id="dashboard-reg-${chartIndex}" class="dashboard-chart"></div>
+                            </div>
                         </div>
-                        <div class="dashboard-chart-block">
-                            <div class="dashboard-subtitle"><span class="dot reg"></span>对数回归估值通道（近3年，拟合窗口仍为近10年）</div>
-                            <div id="dashboard-reg-${chartIndex}" class="dashboard-chart"></div>
-                        </div>
-                    </div>
-                `;
-                grid.appendChild(card);
+                    `;
+                    grid.appendChild(card);
+                }
 
                 const series = [{
                     name: '实时回撤', type: 'line', data: drawdowns3m, showSymbol: false,
@@ -2074,7 +2089,8 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
                     });
                 });
 
-                const chart = echarts.init(document.getElementById(`dashboard-dd-${chartIndex}`), 'dark');
+                const chart = reuse ? dashboardCharts[name + '_dd']
+                    : echarts.init(document.getElementById(`dashboard-dd-${chartIndex}`), 'dark');
                 chart.setOption({
                     backgroundColor: 'transparent',
                     textStyle: { color: '#8b949e', fontFamily: 'inherit' },
@@ -2115,7 +2131,8 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
                     axisMax = hi + pad;
                 }
 
-                const regChartCard = echarts.init(document.getElementById(`dashboard-reg-${chartIndex}`), 'dark');
+                const regChartCard = reuse ? dashboardCharts[name + '_reg']
+                    : echarts.init(document.getElementById(`dashboard-reg-${chartIndex}`), 'dark');
                 regChartCard.setOption({
                     backgroundColor: 'transparent',
                     textStyle: { color: '#8b949e', fontFamily: 'inherit' },
@@ -2849,7 +2866,7 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
                 // 底部滑轨已移除：区间改由「净值图区间」按钮与起止日期选择器控制；滚轮缩放（inside）保留
                 dataZoom: [{ type: 'inside' }],
                 series: [{
-                    name: '点位', type: 'line', data: data.values, showSymbol: false,
+                    name: '点位', type: 'line', data: data.values, sampling: 'lttb', showSymbol: false,
                     lineStyle: { width: 2, color: '#58a6ff' },
                     areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{offset: 0, color: 'rgba(88,166,255,0.15)'}, {offset: 1, color: 'rgba(88,166,255,0)'}]) }
                 }]
@@ -2915,7 +2932,7 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
 
             // 2. 回撤图
             const ddSeries = [{ 
-                name: '实时回撤', type: 'line', data: data.drawdowns, showSymbol: false, 
+                name: '实时回撤', type: 'line', data: data.drawdowns, sampling: 'lttb', showSymbol: false, 
                 areaStyle: { color: 'rgba(248, 81, 73, 0.1)' }, 
                 itemStyle: { color: '#f85149' }, lineStyle: { width: 2.5 }, z: 10 
             }];
@@ -2998,7 +3015,7 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
                 xAxis: { type: 'category', data: regDates, axisLine: { lineStyle: { color: '#30363d' } } },
                 yAxis: { type: 'log', min: regAxisMin, max: regAxisMax, name: '对数价格', splitLine: { lineStyle: { color: '#21262d', type: 'dashed' } } },
                 series: [
-                    { name: '对数收盘价', type: 'line', data: regValues, showSymbol: false, lineStyle: { width: 1.5, color: '#58a6ff' }, z: 3 },
+                    { name: '对数收盘价', type: 'line', data: regValues, sampling: 'lttb', showSymbol: false, lineStyle: { width: 1.5, color: '#58a6ff' }, z: 3 },
                     { name: '逃顶线 (高点回归)', type: 'line', data: regHighPrices, showSymbol: false, lineStyle: { width: 2, type: 'dashed', color: '#f85149' }, z: 4 },
                     { name: '超底线 (低点回归)', type: 'line', data: regLowPrices, showSymbol: false, lineStyle: { width: 2, type: 'dashed', color: '#3fb950' }, z: 4 }
                 ]
@@ -3440,7 +3457,7 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
                 dataZoom: [{ type: 'inside' }],
                 series: [
                     {
-                        name: '价值风向', type: 'line', data: upLog, showSymbol: false,
+                        name: '价值风向', type: 'line', data: upLog, sampling: 'lttb', showSymbol: false,
                         lineStyle: { width: 1, color: '#f85149' },
                         itemStyle: { color: '#f85149' },
                         areaStyle: { color: 'rgba(248,81,73,0.20)', origin: mean },
@@ -3455,7 +3472,7 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
                         }
                     },
                     {
-                        name: '成长风向', type: 'line', data: downLog, showSymbol: false,
+                        name: '成长风向', type: 'line', data: downLog, sampling: 'lttb', showSymbol: false,
                         lineStyle: { width: 1, color: '#58a6ff' },
                         itemStyle: { color: '#58a6ff' },
                         areaStyle: { color: 'rgba(88,166,255,0.20)', origin: mean },
@@ -3593,7 +3610,7 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
                 dataZoom: [{ type: 'inside' }],
                 series: [
                     {
-                        name: '20日波动率', type: 'line', data: vol, showSymbol: false,
+                        name: '20日波动率', type: 'line', data: vol, sampling: 'lttb', showSymbol: false,
                         lineStyle: { width: 1.5, color: '#d29922' },
                         areaStyle: { color: 'rgba(210,153,34,0.12)' },
                         z: 3,
