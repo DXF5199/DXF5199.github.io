@@ -615,6 +615,74 @@ def fetch_cni_history(code):
         print(f"获取国证指数 {code} 历史行情失败: {e}")
     return {}
 
+# A500 风格对比（价值&成长仪表盘「大盘风格」视图）：A500红利全收益 / A500成长全收益。
+# 两者均走中证官网全收益代码（CNY010 后缀 = 全收益；CNY020 = 净收益，勿混用）：
+#   932154CNY010 = 中证A500红利全收益
+#   932494CNY010 = 中证A500成长全收益
+# 该数据独立内嵌为 a500StyleData 块（不进入 allData，避免污染估值仪表盘/指数选择器）。
+A500_VALUE_CODE = "932154CNY010"
+A500_GROWTH_CODE = "932494CNY010"
+
+
+def build_a500_style_js(existing_content):
+    """增量更新 a500StyleData 数据块，返回替换后的 JS 字符串；无变化返回 None。
+
+    与 allData 的增量逻辑一致：只拉取已保存日期前 14 个自然日至今，既补齐
+    节假日/延迟披露，又不会用远端数据覆盖网页历史序列。两指数按日期对齐，
+    仅保留两个序列都有的交易日（保证前端 log 比值可计算）。
+    """
+    m = re.search(r'let a500StyleData = (\{.*?\});', existing_content, re.DOTALL)
+    if not m:
+        print("⚠️ HTML 中未找到 a500StyleData 数据块，跳过 A500 风格数据更新。")
+        return None
+    try:
+        data = json.loads(m.group(1))
+    except ValueError as e:
+        print(f"⚠️ a500StyleData 数据块解析失败，跳过更新: {e}")
+        return None
+
+    dates = data.get("dates") or []
+    value = data.get("value") or []
+    growth = data.get("growth") or []
+    last_saved = max(dates) if dates else None
+
+    dv = fetch_csi_history(A500_VALUE_CODE, last_saved)
+    dg = fetch_csi_history(A500_GROWTH_CODE, last_saved)
+    # 中证接口偶发连接重置：单指数失败重试两次，避免 Action 单次抖动导致漏更
+    if not dv and last_saved:
+        for _ in range(2):
+            time.sleep(2)
+            dv = fetch_csi_history(A500_VALUE_CODE, last_saved)
+            if dv:
+                break
+    if not dg and last_saved:
+        for _ in range(2):
+            time.sleep(2)
+            dg = fetch_csi_history(A500_GROWTH_CODE, last_saved)
+            if dg:
+                break
+    if not dv and not dg:
+        print("⚠️ A500 红利/成长指数抓取均失败，保留现有数据。")
+        return None
+
+    vmap = dict(zip(dates, value))
+    gmap = dict(zip(dates, growth))
+    for d, v in dv.items():
+        vmap[d] = v
+    for d, g in dg.items():
+        gmap[d] = g
+    # 只保留两序列共有的日期，保持与网页一致的对齐结构
+    new_dates = sorted(d for d in set(vmap) | set(gmap) if d in vmap and d in gmap)
+    new_value = [round(vmap[d], 2) for d in new_dates]
+    new_growth = [round(gmap[d], 2) for d in new_dates]
+
+    if new_dates == dates and new_value == value and new_growth == growth:
+        print("A500 风格数据已是最新。")
+        return None
+    print(f"A500 风格数据：{len(dates)} → {len(new_dates)} 个交易日，最新 {new_dates[-1]}。")
+    new_data = {"dates": new_dates, "value": new_value, "growth": new_growth}
+    return "let a500StyleData = " + json.dumps(new_data, separators=(',', ':'), ensure_ascii=False) + ";"
+
 # 标普指数（SP 源）：官网有 Akamai 防护无法程序化抓取，更新策略分两层：
 #   1) 平时：用跟踪 ETF（红利低波50ETF南方 515450）的「累计净值」日收益推算
 #      （fund.eastmoney.com 可直接抓取，无 IP 限制）。实测 2020 年以来与官方
@@ -1942,7 +2010,10 @@ def update_html(file_path):
                 all_data[name]["profile"] = profile
                 updated_any = True
 
-    if updated_any or history_changed:
+    # A500 风格对比数据（大盘价值/成长）：独立内嵌块，随 Action 每日增量更新
+    a500_js = build_a500_style_js(content)
+
+    if updated_any or history_changed or a500_js:
         if updated_any:
             new_json = json.dumps(all_data, ensure_ascii=False)
             # 用完整匹配段替换，避免 JSON 子串与正文其他文本重复时误替换
@@ -1954,6 +2025,12 @@ def update_html(file_path):
                            + content[hist_match.end():])
             else:
                 print("⚠️ HTML 中未找到 pepbHistory 块，历史序列未写回")
+        if a500_js:
+            a5_match = re.search(r'let a500StyleData = \{.*?\};', content, re.DOTALL)
+            if a5_match:
+                content = content[:a5_match.start()] + a500_js + content[a5_match.end():]
+            else:
+                print("⚠️ HTML 中未找到 a500StyleData 块，A500 风格数据未写回")
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(content)
         print("🎉 所有指数及图表指标已成功同步更新。")
