@@ -615,12 +615,12 @@ def fetch_cni_history(code):
         print(f"获取国证指数 {code} 历史行情失败: {e}")
     return {}
 
-# A500 风格对比（价值&成长仪表盘「大盘风格」视图）：A500红利全收益 / A500成长全收益。
+# A500 风格对比（价值&成长仪表盘「大盘风格」视图）：A500价值全收益 / A500成长全收益。
 # 两者均走中证官网全收益代码（CNY010 后缀 = 全收益；CNY020 = 净收益，勿混用）：
-#   932154CNY010 = 中证A500红利全收益
+#   932497CNY010 = 中证A500价值全收益
 #   932494CNY010 = 中证A500成长全收益
 # 该数据独立内嵌为 a500StyleData 块（不进入 allData，避免污染估值仪表盘/指数选择器）。
-A500_VALUE_CODE = "932154CNY010"
+A500_VALUE_CODE = "932497CNY010"
 A500_GROWTH_CODE = "932494CNY010"
 
 
@@ -662,7 +662,7 @@ def build_a500_style_js(existing_content):
             if dg:
                 break
     if not dv and not dg:
-        print("⚠️ A500 红利/成长指数抓取均失败，保留现有数据。")
+        print("⚠️ A500 价值/成长指数抓取均失败，保留现有数据。")
         return None
 
     vmap = dict(zip(dates, value))
