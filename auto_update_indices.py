@@ -331,11 +331,15 @@ def build_etf_block(data_obj, etf_meta, quote):
     指数点位与 ETF 价格近似等比，故先由「现价 /(1+当前回撤)」反推出零回撤
     （即历史前高）对应的价格，再按分位线自身的回撤幅度折算：
         price(dd) = peak_price * (1 + dd / 100)
+
+    序列字段（drawdowns/percentiles）已不内嵌 HTML，这里由 values 现算：
+    当前回撤 = 末点相对历史前高；分位线末值 = 最后一个完整窗口的分位。
     """
-    drawdowns = data_obj.get("drawdowns") or []
-    if not drawdowns:
+    values = data_obj.get("values") or []
+    if not values:
         return {}
 
+    drawdowns = _calc_drawdowns(values)
     current_dd = float(drawdowns[-1])
     price = float(quote["price"])
     denominator = 1 + current_dd / 100.0
@@ -344,9 +348,14 @@ def build_etf_block(data_obj, etf_meta, quote):
     peak_price = price / denominator  # 回撤 0% 时的价格，即前高对应价
 
     levels = {}
-    for p_name, series in (data_obj.get("percentiles") or {}).items():
-        last_q = series[-1] if series else None
-        levels[p_name] = round(peak_price * (1 + float(last_q) / 100.0), 4) if last_q is not None else None
+    for p_name, (years, q) in PERCENTILE_SPECS.items():
+        w = 1218 if years == 5 else 2431
+        window = drawdowns[-w:]
+        if len(window) < w:
+            levels[p_name] = None
+        else:
+            last_q = float(np.percentile(window, (100 - q)))  # linear 插值，同 pandas rolling quantile
+            levels[p_name] = round(peak_price * (1 + last_q / 100.0), 4)
 
     return {
         "code": etf_meta["code"],
@@ -580,8 +589,8 @@ def fetch_csi_history(code, last_saved_date):
     }
 
     try:
-        response = requests.get(url, params=params, headers=headers, timeout=30)
-        response.raise_for_status()
+        # 中证接口偶发连接重置/限流，统一走带重试的请求（3 次）
+        response = _request_with_retry(url, params=params, headers=headers, timeout=30)
         payload = response.json()
         rows = payload.get("data") or []
         if payload.get("success") is True and rows:
@@ -607,7 +616,7 @@ def fetch_cni_history(code):
     start_str = (now_cn() - timedelta(days=60)).strftime("%Y-%m-%d")
     params = {"indexCode": code, "startDate": start_str, "endDate": end_str, "frequency": "day"}
     try:
-        r = requests.get(url, params=params, timeout=15)
+        r = _request_with_retry(url, params=params, timeout=15)
         data = r.json()
         if data.get("data") and data["data"].get("data"):
             return {row[0]: float(row[5]) for row in data["data"]["data"]}
@@ -1123,6 +1132,35 @@ def _extrapolate_wind_from_ths(last_saved_date, last_saved_value):
         print(f"同花顺微盘板块倒推失败: {e}")
         return {}
 
+# 滚动分位线规格：字段名 -> (窗口年数, 分位 q)。
+# Excel 口径：实际分位参数 p = (100-q)/100（如「50%分位」用 p=0.25），
+# 窗口 5年=1218 天、10年=2431 天。update_index_calculations 与
+# build_etf_block（ETF 价格分位线只需末值）共用此规格。
+PERCENTILE_SPECS = {
+    "滚动五年50%分位": (5, 50),
+    "滚动五年70%分位": (5, 70),
+    "滚动五年90%分位": (5, 90),
+    "滚动十年50%分位": (10, 50),
+    "滚动十年70%分位": (10, 70),
+    "滚动十年90%分位": (10, 90),
+}
+
+
+def _calc_drawdowns(values):
+    """由点位序列计算回撤百分比序列（与 numpy 口径一致，供脚本内部使用）。
+
+    序列 drawdowns/percentiles/reg_high/reg_low 等不再内嵌进 HTML
+    （体积优化，前端由 values 实时重建），脚本仅在内部计算标量时使用。
+    """
+    peak = float("-inf")
+    out = []
+    for v in values:
+        if v > peak:
+            peak = v
+        out.append((v / peak - 1) * 100)
+    return out
+
+
 def calculate_rolling_quantiles(drawdowns, window_years, quantile_levels):
     """
     对齐 Excel 的滚动分位线计算:
@@ -1162,10 +1200,9 @@ def update_index_calculations(data_obj):
     prices = np.array(values)
     n_total = len(prices)
     
-    # 1. 计算回撤
+    # 1. 计算回撤（drawdowns 序列仅内部使用，不写入 HTML，前端实时重建）
     max_prices = np.maximum.accumulate(prices)
     drawdowns = (prices / max_prices - 1) * 100
-    data_obj["drawdowns"] = [round(float(d), 2) for d in drawdowns]
     data_obj["max_drawdown"] = round(float(np.min(drawdowns)), 2)
 
     # 1.1 回撤时长（单位：交易日）
@@ -1211,59 +1248,49 @@ def update_index_calculations(data_obj):
         data_obj["current_drawdown_days"] = 0
         data_obj["current_repair_days"] = 0
     
-    # 2. 计算滚动分位线 (使用对齐 Excel 的新逻辑)
-    q5 = calculate_rolling_quantiles(drawdowns, 5, [50, 70, 90])
-    q10 = calculate_rolling_quantiles(drawdowns, 10, [50, 70, 90])
+    # 2. 滚动分位线已不再写入 HTML（前端由 values 实时重建，见 rebuildDerivedSeries），
+    #    仅清理历史遗留序列字段（见下方 pop）。
 
-    # 修正 HTML 字段名映射: 网页 JS 查找的是 'percentiles'
-    data_obj["percentiles"] = {
-        "滚动五年50%分位": q5[50],
-        "滚动五年70%分位": q5[70],
-        "滚动五年90%分位": q5[90],
-        "滚动十年50%分位": q10[50],
-        "滚动十年70%分位": q10[70],
-        "滚动十年90%分位": q10[90]
-    }
+    # 序列字段（percentiles / reg_high / reg_low / regression / drawdowns /
+    # quantile_lines / log_values / top_line / bottom_line / high/low_points）
+    # 已不再内嵌 HTML——体积优化，前端由 values 实时重建（见 HTML 内
+    # rebuildDerivedSeries()）。这里仅清理历史 HTML 中遗留的序列字段，
+    # 避免旧文件跑脚本时残留（单指数约省 270KB）。
+    for legacy_key in ("percentiles", "reg_high", "reg_low", "regression",
+                       "drawdowns", "quantile_lines", "log_values",
+                       "top_line", "bottom_line", "high_points", "low_points"):
+        data_obj.pop(legacy_key, None)
     
     # 3. 对数回归通道：严格使用“最新交易日向前滚动10个日历年”的样本。
     # 这样每次新增交易日后，拟合窗口会同步向前滚动，而非固定使用2520个交易日。
+    # 通道序列本身不写入 HTML（前端实时重建），这里只保留年化收益标量。
     date_index = pd.to_datetime(data_obj["dates"])
     cutoff_date = date_index[-1] - pd.DateOffset(years=10)
     valid_indices = np.flatnonzero(date_index >= cutoff_date)
     start_idx = int(valid_indices[0]) if len(valid_indices) else 0
     prices_10y = values[start_idx:]
-    n_10y = len(prices_10y)
 
-    high_pts_local = find_points(prices_10y, is_high=True)
-    low_pts_local = find_points(prices_10y, is_high=False)
-
-    def get_line(pts):
+    def get_annual_return(pts):
         x = np.array([p[0] for p in pts])
         y = np.array([p[1] for p in pts])
-        slope, intercept, _, _, _ = stats.linregress(x, y)
-        line = slope * np.arange(n_10y) + intercept
-        annual_ret = (np.exp(slope * 252) - 1) * 100
-        return line, round(float(annual_ret), 2)
+        slope, _, _, _, _ = stats.linregress(x, y)
+        return round(float((np.exp(slope * 252) - 1) * 100), 2)
 
-    reg_high_10y, high_ret = get_line(high_pts_local)
-    reg_low_10y, low_ret = get_line(low_pts_local)
-    x_base = np.arange(n_10y)
-    y_base = np.log(prices_10y)
-    slope_b, intercept_b, _, _, _ = stats.linregress(x_base, y_base)
-    regression_10y = slope_b * x_base + intercept_b
-
-    # 在10年窗口之前填充None，防止旧历史区间出现不属于本轮拟合的通道线。
-    prefix = [None] * start_idx
-    data_obj["regression"] = prefix + [round(float(v), 4) for v in regression_10y]
-    data_obj["reg_high"] = prefix + [round(float(v), 4) for v in reg_high_10y]
-    data_obj["reg_low"] = prefix + [round(float(v), 4) for v in reg_low_10y]
-    data_obj["high_points"] = [[int(p[0] + start_idx), round(float(p[1]), 4)] for p in high_pts_local]
-    data_obj["low_points"] = [[int(p[0] + start_idx), round(float(p[1]), 4)] for p in low_pts_local]
-    data_obj["annual_return_high"] = high_ret
-    data_obj["annual_return_low"] = low_ret
+    data_obj["annual_return_high"] = get_annual_return(find_points(prices_10y, is_high=True))
+    data_obj["annual_return_low"] = get_annual_return(find_points(prices_10y, is_high=False))
     data_obj["regression_start_index"] = start_idx
     data_obj["regression_start_date"] = data_obj["dates"][start_idx]
     data_obj["regression_window_years"] = 10
+
+    # 序列字段（percentiles / reg_high / reg_low / regression / drawdowns /
+    # quantile_lines / log_values / top_line / bottom_line / high/low_points）
+    # 已不再内嵌 HTML——体积优化，前端由 values 实时重建（见 HTML 内
+    # rebuildDerivedSeries()）。这里清理历史 HTML 中遗留的序列字段，
+    # 避免旧文件跑脚本时残留（单指数约省 330KB）。
+    for legacy_key in ("percentiles", "reg_high", "reg_low", "regression",
+                       "drawdowns", "quantile_lines", "log_values",
+                       "top_line", "bottom_line", "high_points", "low_points"):
+        data_obj.pop(legacy_key, None)
 
 def _normalize_date(raw):
     """把 20260930 / 2026-09-30 统一成 YYYY-MM-DD。"""
@@ -1864,6 +1891,10 @@ def update_html(file_path):
                 recent_data = fetch_wind_history(code, anchor["date"], anchor["value"])
         except Exception as e:
             print(f"⚠️ {name}（{code}）历史数据抓取失败，保留本地数据: {e}")
+        if not recent_data:
+            # 抓取失败或数据源尚未发布最新数据：明示保留旧数据，下次运行会自动补齐
+            #（增量窗口为已保存日期前 14 天，缺的日子下次成功抓取时自动回补）
+            print(f"⚠️ {name}（{code}）本次未获取到任何新数据，点位仍停留在 {last_saved_date}。")
         index_updated = False
         
         if recent_data:
@@ -1879,20 +1910,16 @@ def update_html(file_path):
                     index_updated = True
         
         # 强制检查：如果派生数据长度与日期长度不符，或者字段缺失，触发重新计算
-        p_lines = all_data[name].get("percentiles", {})
-        p_len = len(next(iter(p_lines.values()))) if p_lines else 0
-        
+        # 强制检查：如果标量派生数据缺失，触发重新计算
+        #（序列字段已不内嵌 HTML，无需再检查其长度）
         if (
             index_updated
-            or p_len != len(dates)
-            or len(all_data[name].get("reg_high", [])) != len(dates)
             or "regression_start_index" not in all_data[name]
             or all_data[name].get("regression_window_years") != 10
             or "median_drawdown_days" not in all_data[name]
             or "median_repair_days" not in all_data[name]
             or "current_drawdown_days" not in all_data[name]
             or "current_repair_days" not in all_data[name]
-            or "滚动十年90%分位" not in (all_data[name].get("percentiles") or {})
         ):
             combined = sorted(zip(dates, values), key=lambda x: x[0])
             all_data[name]["dates"] = [x[0] for x in combined]
