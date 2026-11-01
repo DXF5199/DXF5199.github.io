@@ -758,13 +758,39 @@ def _fetch_sp_official_weekly():
     该站为 Next.js SSR，点位内嵌在 RSC payload 的 initialData.chart_series
     中（约每周 1 个采样点，数据与 S&P 官网一致，起点 2016-09-30）。
     返回 {YYYY-MM-DD: 点位}；抓取/解析失败时抛异常，由调用方容错。
+
+    失败兜底与诊断：
+    - 两组请求头依次尝试（部分 WAF 会拦截缺少 Accept 头的请求）；
+    - 解析失败时把 HTTP 状态码与页面文本片段写进异常消息，
+      便于在 Actions 日志/前端警告里直接看到 ypingcn 到底返回了什么
+      （GitHub Actions 数据中心 IP 曾被该站间歇性 403 拦截）。
     """
-    r = _request_with_retry(YPINGCN_URL, timeout=25, headers={
-        "User-Agent": TENCENT_HEADERS["User-Agent"],
-    })
+    header_sets = [
+        {"User-Agent": TENCENT_HEADERS["User-Agent"]},
+        {   # 完整浏览器头兜底
+            "User-Agent": TENCENT_HEADERS["User-Agent"],
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+        },
+    ]
+    r, last_err = None, None
+    for hs in header_sets:
+        try:
+            r = _request_with_retry(YPINGCN_URL, timeout=25, headers=hs)
+            break
+        except Exception as e:
+            last_err = e
+    if r is None:
+        raise last_err
+
+    def _diag():
+        # 诊断信息：状态码 + 去标签后的页面文本前 150 字
+        snippet = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", r.text)).strip()
+        return f"HTTP {r.status_code}，页面片段: {snippet[:150]!r}"
+
     chunks = re.findall(r'self\.__next_f\.push\(\[1,"((?:[^"\\]|\\.)*)"\]\)', r.text)
     if not chunks:
-        raise ValueError("ypingcn 页面未找到 RSC payload（页面结构可能已变化）")
+        raise ValueError("ypingcn 页面未找到 RSC payload（" + _diag() + "）")
     text = "".join(c.encode().decode("unicode_escape") for c in chunks)
     # 括号配对提取 initialData 的 JSON
     i = text.find("initialData")
@@ -793,7 +819,7 @@ def _fetch_sp_official_weekly():
     series = (obj.get("all") or {}).get("chart_series") or {}
     dates, prices = series.get("dates") or [], series.get("prices") or []
     if not dates or len(dates) != len(prices):
-        raise ValueError("ypingcn chart_series 解析失败（dates/prices 缺失或不等长）")
+        raise ValueError("ypingcn chart_series 解析失败（dates/prices 缺失或不等长；" + _diag() + "）")
     return {d: float(v) for d, v in zip(dates, prices)}
 
 
