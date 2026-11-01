@@ -698,8 +698,10 @@ def build_a500_style_js(existing_content):
 #      TR 日收益相关系数 0.981、日均绝对误差约 0.08 个百分点（与万得微盘的
 #      东财代理同量级）；误差随交易日累积（累计净值未按再投资复利计息）。
 #   2) 每周：ypingcn.com 内嵌与 S&P 官网一致的周频官方点位，自动校正一次——
-#      清除官方末点之后的推算日频点、只保留官方周频数据，再从最新官方点
-#      重新推算至今，使推算漂移每周归零。
+#      清除官方末点之后（含同日）的推算日频点、只保留官方周频数据，再从最新
+#      官方点重新推算至今，使推算漂移每周归零。官方值优先级恒高于推算值：
+#      与官方末点同日的推算值也会被官方点覆盖（可从异常状态自愈）；
+#      只要有官方校正发生，本次运行必定写回并重算指标。
 SP_PROXY_FUND_CODE = "515450"
 # ypingcn.com：第三方指数站，点位与 S&P 官网一致（周频采样内嵌于页面）
 YPINGCN_URL = "https://ypingcn.com/index-detail/SPCLLHCT/"
@@ -1849,6 +1851,7 @@ def update_html(file_path):
         dates, values = all_data[name]["dates"], all_data[name]["values"]
         last_saved_date = max(dates) if dates else None
         recent_data = {}
+        sp_corrected = False  # 标普官方周频校正是否改写了数据（改写则必须写回）
         try:
             if source == "CSI":
                 recent_data = fetch_csi_history(code, last_saved_date)
@@ -1884,21 +1887,32 @@ def update_html(file_path):
                     keep = set(range(len(dates))) - set(drop)
                     dates = [dates[i] for i in sorted(keep)]
                     values = [values[i] for i in sorted(keep)]
+                    sp_corrected = True
                     print(f"标普指数：清除官方末点 {official_end} 之后的 {len(drop)} 个推算日频点。")
-                # 官方周频点就地覆盖/追加（只处理晚于官方末点的新周点）
+                # 官方周频点就地覆盖/追加。注意用 >=：与官方末点同日的值如果是
+                # 上次运行残留的推算值（例如上次官方抓取失败、本次才恢复），
+                # 也要被官方值覆盖，否则官方末点只增不减会把同日推算值永久锁死
                 if official:
                     for d, v in sorted(official.items()):
-                        if d > official_end:
+                        if official_end is None or d >= official_end:
                             if d in dates:
-                                values[dates.index(d)] = v
+                                idx0 = dates.index(d)
+                                if abs(values[idx0] - v) > 0.001:
+                                    old_v = values[idx0]
+                                    values[idx0] = v
+                                    sp_corrected = True
+                                    print(f"标普指数：官方点覆盖 {d} 推算值 {old_v} → {v}。")
                             else:
                                 dates.append(d)
                                 values.append(v)
+                                sp_corrected = True
                     # 官方末点只增不减：即使本次无新周点也落盘，
                     # 防止个别运行抓取失败后误把官方历史日频当推算点清除
                     prev_end = all_data[name].get("sp_official_end")
-                    all_data[name]["sp_official_end"] = max(
-                        max(official), prev_end or "")
+                    new_end = max(max(official), prev_end or "")
+                    if new_end != prev_end:
+                        all_data[name]["sp_official_end"] = new_end
+                        sp_corrected = True
                     print(f"标普指数：官方周频数据校正至 {all_data[name]['sp_official_end']}。")
                 all_data[name]["dates"] = dates
                 all_data[name]["values"] = values
@@ -1922,6 +1936,11 @@ def update_html(file_path):
             #（增量窗口为已保存日期前 14 天，缺的日子下次成功抓取时自动回补）
             print(f"⚠️ {name}（{code}）本次未获取到任何新数据，点位仍停留在 {last_saved_date}。")
         index_updated = False
+        if source == "SP":
+            # 官方周频校正即使没带来新推算点（如周末运行），只要改写了数据
+            # （清除推算点/官方点覆盖或追加），就必须写回并重算指标，
+            # 否则校正结果会被“无变化不写回”机制丢弃，造成官方值永久丢失
+            index_updated = sp_corrected
         
         if recent_data:
             for d_str, price in sorted(recent_data.items(), key=lambda x: x[0]):
@@ -2068,7 +2087,7 @@ def update_html(file_path):
 
     if updated_any or history_changed or a500_js:
         if updated_any:
-            new_json = json.dumps(all_data, ensure_ascii=False)
+            new_json = json.dumps(all_data, ensure_ascii=False, separators=(",", ":"))
             # 用完整匹配段替换，避免 JSON 子串与正文其他文本重复时误替换
             content = content[:match.start()] + f"let allData = {new_json};" + content[match.end():]
         if history_changed:
