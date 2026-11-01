@@ -42,6 +42,9 @@ INDEX_CONFIG = [
     # 一致的周频官方点位，每周自动校正一次（清除官方末点之后的推算日频点，
     # 只保留官方周频数据），保证推算漂移每周归零。
     {"code": "SPCNALV50TR", "name": "标普红利低波50全收益", "source": "SP"},
+    # 纳斯达克100指数（价格收益 NDX）：美股指数，数据源为腾讯行情日 K。
+    # 注意为价格指数口径（不含股息再投资），与 A 股全收益指数口径不同。
+    {"code": "usNDX", "name": "纳斯达克100指数", "source": "US"},
     # 回测工具的比较基准：仅用于回测对照，不展示在画像/估值等模块
     {"code": "H00300", "name": "沪深300全收益", "source": "CSI", "benchmark_only": True}
 ]
@@ -91,6 +94,14 @@ TENCENT_HEADERS = {
     "Referer": "https://gu.qq.com/",
 }
 # 腾讯行情字段下标
+# 腾讯行情日 K 接口（proxy 域名，web.ifzq.gtimg.cn 主站有 WAF 校验）：
+# 用于美股指数（如纳斯达克100）的日线抓取，返回 [[date, open, close, high, low, volume], ...]。
+US_KLINE_URL = "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get"
+US_KLINE_HEADERS = {
+    "User-Agent": TENCENT_HEADERS["User-Agent"],
+    "Referer": "https://gu.qq.com/",
+}
+
 TENCENT_FIELD_PE = 39    # 市盈率(TTM)
 TENCENT_FIELD_PB = 46    # 市净率
 TENCENT_FIELD_DY = 64    # 股息率(%)
@@ -622,6 +633,47 @@ def fetch_cni_history(code):
             return {row[0]: float(row[5]) for row in data["data"]["data"]}
     except Exception as e:
         print(f"获取国证指数 {code} 历史行情失败: {e}")
+    return {}
+
+def fetch_us_history(code, last_saved_date=None):
+    """抓取美股指数（如纳斯达克100）的最近交易日收盘点位。
+
+    数据源：腾讯行情日 K 接口（proxy.finance.qq.com 的 newfqkline 接口）。
+    日 K 返回 [[date, open, close, high, low, volume, ...], ...]，收盘价在 index 2。
+    拉取最近 60 个交易日，既能补齐节假日/漏跑，又不会用远端数据覆盖网页历史序列。
+    """
+    try:
+        param = f"{code},day,,,60,qfq"
+        r = _request_with_retry(US_KLINE_URL, params={"param": param},
+                                headers=US_KLINE_HEADERS, timeout=20)
+        payload = r.json()
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            return {}
+        rows = (data.get(code) or {}).get("day") or []
+        result = {}
+        for row in rows:
+            if len(row) >= 3 and row[0] and row[2] is not None:
+                result[str(row[0])] = float(row[2])
+        # 丢弃当日尚未收盘定稿的 K 线：美股常规收盘 16:00 ET（夏令时=北京时间次日
+        # 04:00、冬令时=次日 05:00），统一以次日 05:30 为安全阈值——早于该时刻的
+        # 当日 K 线仍是盘中价，不能当作收盘价写进网页。
+        if result:
+            last_date = max(result)
+            try:
+                d = datetime.strptime(last_date, "%Y-%m-%d").date()
+                final_at = datetime(d.year, d.month, d.day, 5, 30, 0, tzinfo=CN_TZ) + timedelta(days=1)
+                if now_cn() < final_at:
+                    result.pop(last_date, None)
+                    print(f"美股指数 {code}：{last_date} 当日 K 线尚未收盘定稿，暂不写入。")
+            except (TypeError, ValueError):
+                pass
+        if result:
+            latest = max(result)
+            print(f"美股指数 {code}：获取 {len(result)} 条数据，最新 {latest} / {result[latest]:.2f}")
+        return result
+    except Exception as e:
+        print(f"抓取美股指数 {code} 历史行情失败: {e}")
     return {}
 
 # A500 风格对比（价值&成长仪表盘「大盘风格」视图）：A500价值全收益 / A500成长全收益。
@@ -1919,6 +1971,9 @@ def update_html(file_path):
                 # 从最新末点（官方周点或官方历史末点）起重新推算日频
                 recent_data = _extrapolate_sp_from_fund(
                     max(dates) if dates else None, values[-1] if values else None)
+            elif source == "US":
+                # 美股指数（如纳斯达克100）：腾讯行情日 K 最近 60 个交易日，逐日合并
+                recent_data = fetch_us_history(code, last_saved_date)
             else:  # WIND
                 # 万得微盘为推算口径：固定锚点（准确数据最后一天）+ 代理指数最新收盘，
                 # 每次重推锚点之后的全部交易日并覆盖旧值。这样即便某次运行抓到了
