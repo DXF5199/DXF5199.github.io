@@ -39,6 +39,10 @@ jobs:
       - name: 抓取最新点位、ETF 收盘价并同步重算指标
         env:
           TZ: Asia/Shanghai
+          # Wind Alice 官方数据通道：仓库 Settings → Secrets and variables → Actions
+          # 新建 secret 名称 WIND_API_KEY，值填 ak_ 开头的 API Key。
+          # 未配置时脚本自动回退到推算口径，不会报错中断。
+          WIND_API_KEY: ${{ secrets.WIND_API_KEY }}
         run: python -u auto_update_indices.py
 
       - name: 提交并推送更新后的网页
