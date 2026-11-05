@@ -9,6 +9,7 @@ from datetime import date, datetime, timedelta, timezone
 import time
 import os
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 
 try:
     from zoneinfo import ZoneInfo
@@ -36,7 +37,7 @@ INDEX_CONFIG = [
     {"code": "480081", "name": "价值100全收益", "source": "CNI"},
     {"code": "480080", "name": "成长100全收益", "source": "CNI"},
     {"code": "H21187", "name": "中证科技100全收益", "source": "CSI"},
-    {"code": "8841431.WI", "name": "万得微盘股指数", "source": "WIND"},
+    {"code": "868008.WI", "name": "微盘股", "source": "WIND"},
     # 标普中国A股大盘红利低波50指数（总收益）：官网有 Akamai 防护无法程序化抓取。
     # 平时按跟踪 ETF（515450）累计净值的日频涨跌幅推算；ypingcn.com 内嵌与官网
     # 一致的周频官方点位，每周自动校正一次（清除官方末点之后的推算日频点，
@@ -189,6 +190,200 @@ def _request_with_retry(url, tries=3, sleep_seconds=1.5, **kwargs):
         if attempt < tries - 1:
             time.sleep(sleep_seconds)
     raise requests.RequestException(last_error or "请求失败")
+
+
+# ===== Wind Alice 官方数据通道（MCP over HTTP）=====
+# 用 API Key 直连 Wind 数据服务，取官方日频点位、加权 PB、成份股总市值中位数。
+# Key 只从环境变量读取：本地 export WIND_API_KEY=...，GitHub Actions 用仓库 Secret。
+# 该通道是「准确数据」的首选源；任何一步失败都自动回退到原有的推算口径，不会中断更新。
+WIND_MCP_URL = "https://mcp.wind.com.cn/vserver_wind_tools/mcp/"
+WIND_API_KEY = os.environ.get("WIND_API_KEY", "").strip()
+# 标普中国A股大盘红利低波50 全收益指数（Wind 代码）：官方日频，替代 515450 净值推算
+SP_WINDCODE = "SPCLLHCT.SPI"
+# 本次运行内 Wind 通道是否已被判定不可用（鉴权失败/额度不足等），避免每个指数重复试错
+_WIND_STATE = {"ok": True, "reason": ""}
+
+
+def wind_configured():
+    """是否配置了 API Key 且通道未被判定失效。"""
+    return bool(WIND_API_KEY) and _WIND_STATE["ok"]
+
+
+def _wind_call(tool_name, params, timeout=120):
+    """调用 Wind MCP 网关上的数据工具，返回其文本结果；失败抛异常。"""
+    if not WIND_API_KEY:
+        raise RuntimeError("未配置 WIND_API_KEY")
+    payload = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+               "params": {"name": "market_call_tool",
+                          "arguments": {"toolName": tool_name,
+                                        "arguments": json.dumps(params, ensure_ascii=False)}}}
+    headers = {"Authorization": "Bearer " + WIND_API_KEY,
+               "Accept": "application/json, text/event-stream"}
+    last_error = None
+    for attempt in range(3):
+        try:
+            resp = requests.post(WIND_MCP_URL, json=payload, headers=headers, timeout=timeout)
+            if resp.status_code != 200:
+                last_error = f"HTTP {resp.status_code}"
+                # 401/403 是 Key 或权限问题，重试无意义，直接整轮禁用该通道
+                if resp.status_code in (401, 403):
+                    _WIND_STATE.update(ok=False, reason=last_error)
+                    raise RuntimeError(f"Wind 鉴权失败（{last_error}），本次改用推算口径")
+                if 400 <= resp.status_code < 500:
+                    break
+            else:
+                # 服务端返回 SSE（text/event-stream），requests 对这类响应默认按
+                # Latin-1 解码，中文会变乱码，必须强制 UTF-8。
+                resp.encoding = "utf-8"
+                # 响应体较大时单个 JSON 会被拆成多条 data: 行，按 SSE 规范用换行拼接后再解析。
+                events, cur = [], []
+                for ln in resp.text.splitlines():
+                    if ln.startswith("data:"):
+                        cur.append(ln[5:].lstrip())
+                    elif not ln.strip() and cur:
+                        events.append(cur)
+                        cur = []
+                if cur:
+                    events.append(cur)
+                if not events:
+                    raise RuntimeError("Wind 返回空响应")
+                msg = None
+                for chunk in ("\n".join(events[0]), "".join(events[0])):
+                    try:
+                        msg = json.loads(chunk)
+                        break
+                    except json.JSONDecodeError:
+                        continue
+                if msg is None:
+                    raise RuntimeError("Wind 返回内容无法解析为 JSON")
+                if msg.get("error"):
+                    raise RuntimeError(str(msg["error"])[:200])
+                result = msg.get("result") or {}
+                content = result.get("content") or [{}]
+                text = content[0].get("text", "")
+                if result.get("isError"):
+                    # 额度不足等账户级问题：本次运行整体停用 Wind 通道
+                    if "额度" in text or "余额" in text or "AUTH" in text.upper():
+                        _WIND_STATE.update(ok=False, reason=text[:120])
+                    raise RuntimeError(text[:200] or "Wind 工具返回错误")
+                return text
+        except requests.RequestException as e:
+            last_error = str(e)
+        if attempt < 2:
+            time.sleep(2)
+    raise requests.RequestException(str(last_error))
+
+
+def wind_index_kline(windcode, begin_date, end_date):
+    """取指数日频收盘点位，返回 {YYYY-MM-DD: 收盘}；无数据返回空 dict。"""
+    text = _wind_call("get_index_kline", {
+        "windcode": windcode, "begin_date": begin_date,
+        "end_date": end_date, "period": "10", "count": 0,
+    })
+    doc = json.loads(text)
+    block = doc.get("data") or {}
+    if isinstance(block, dict) and isinstance(block.get("data"), dict):
+        block = block["data"]
+    rows = (block or {}).get("rows") or []
+    cols = [c.get("name") for c in (block or {}).get("columns") or []]
+    i_time = cols.index("TIME") if "TIME" in cols else 0
+    i_close = cols.index("MATCH") if "MATCH" in cols else 2
+    out = {}
+    for row in rows:
+        try:
+            d = str(row[i_time])[:10]
+            v = float(row[i_close])
+        except (IndexError, TypeError, ValueError):
+            continue
+        if v > 0:
+            out[d] = v
+    return out
+
+
+def _norm_wind_date(raw):
+    """把 Wind 的 20261105 / 2026-11-05T15:00:02 统一成 YYYY-MM-DD。"""
+    s = str(raw).strip()
+    m = re.match(r"^(\d{4})-?(\d{2})-?(\d{2})", s)
+    return f"{m.group(1)}-{m.group(2)}-{m.group(3)}" if m else None
+
+
+def wind_index_pb_series(windcode="868008.WI", begin_date=None, end_date=None):
+    """取指数日频 PB 序列，返回 {YYYY-MM-DD: PB}。
+
+    逐日序列是各交易日收盘后重算值，与指数点位同步变动；而「某日市净率」
+    的单日快照查询可能返回滞后一日的值（实测 2026-11-05 快照给 2.0287，
+    序列给 2.0873，后者才与当日 +2.93% 的涨幅吻合），因此 PB 一律以本函数为准。
+    单次最多返回 100 个交易日，长区间需由调用方分段。
+    """
+    question = (f"请逐行列出万得微盘股指数({windcode})在{begin_date}至{end_date}"
+                f"期间每个交易日的市净率PB，按日期升序，不要汇总")
+    doc = json.loads(_wind_call("get_index_fundamentals", {"question": question}))
+    blocks = (doc.get("data") or {}).get("data") or []
+    out = {}
+    for blk in blocks:
+        names = [c.get("name", "") for c in blk.get("columns") or []]
+        for row in blk.get("rows") or []:
+            d, pb = None, None
+            for name, val in zip(names, row):
+                if name == "日期" and val:
+                    d = _norm_wind_date(val)
+                elif "市净率" in name and isinstance(val, (int, float)):
+                    pb = float(val)
+            if d and pb and pb > 0:
+                out[d] = round(pb, 4)
+    return out
+
+
+def wind_index_valuation(windcode="868008.WI", trade_date=None):
+    """取指数加权 PB、PE 与成份股总市值中位数。
+
+    返回 {"pb","pe","mcap","date"}；不传 trade_date 时取最新交易日。
+    解析不到 PB 时返回 None，由调用方回退到自算口径。
+
+    注意：该接口按自然语言解析取数口径，问法必须固定。实测「加权市净率」
+    会被解析成另一套口径（返回 5.07，与万得终端的 2.03 不符），
+    因此这里固定用「市净率PB、市盈率PE、成份股总市值中位数」的模板问法。
+    """
+    if trade_date:
+        y, m, d = trade_date.split("-")
+        when = f"{int(y)}年{int(m)}月{int(d)}日"
+    else:
+        when = "最新交易日"
+    question = (f"查询万得微盘股指数({windcode}){when}的市净率PB、市盈率PE，"
+                f"以及成份股总市值中位数")
+    doc = json.loads(_wind_call("get_index_fundamentals", {"question": question}))
+    blocks = (doc.get("data") or {}).get("data") or []
+    pb = pe = mcap = None
+    data_date = None
+    for blk in blocks:
+        names = [c.get("name", "") for c in blk.get("columns") or []]
+        for row in blk.get("rows") or []:
+            for name, val in zip(names, row):
+                # 「交易时间」形如 20261105 15:00:02，比「日期」列更常返回，优先采信
+                if "交易时间" in name and val:
+                    data_date = _norm_wind_date(val) or data_date
+                elif name == "日期" and val:
+                    data_date = _norm_wind_date(val) or data_date
+                elif "市值中位数" in name and isinstance(val, (int, float)):
+                    mcap = float(val)
+                elif "市净率" in name and isinstance(val, (int, float)):
+                    pb = float(val)
+                elif "市盈率" in name and isinstance(val, (int, float)):
+                    pe = float(val)
+    if pb is None:
+        return None
+    # PB 改用逐日序列取当日收盘值：单日快照查询会滞后一日（见 wind_index_pb_series）
+    if trade_date:
+        try:
+            begin = (datetime.strptime(trade_date, "%Y-%m-%d")
+                     - timedelta(days=12)).strftime("%Y-%m-%d")
+            series = wind_index_pb_series(windcode, begin, trade_date)
+            if series.get(trade_date):
+                pb = series[trade_date]
+        except Exception as e:
+            print(f"微盘估值：PB 序列查询失败，沿用快照值 {pb}: {e}")
+    return {"pb": round(pb, 4), "pe": round(pe, 4) if pe is not None else None,
+            "mcap": round(mcap, 4) if mcap is not None else None, "date": data_date}
 
 
 def fetch_risk_free_rate():
@@ -747,7 +942,7 @@ def build_a500_style_js(existing_content):
 # 标普指数（SP 源）：官网有 Akamai 防护无法程序化抓取，更新策略分两层：
 #   1) 平时：用跟踪 ETF（红利低波50ETF南方 515450）的「累计净值」日收益推算
 #      （fund.eastmoney.com 可直接抓取，无 IP 限制）。实测 2020 年以来与官方
-#      TR 日收益相关系数 0.981、日均绝对误差约 0.08 个百分点（与万得微盘的
+#      TR 日收益相关系数 0.981、日均绝对误差约 0.08 个百分点（与微盘的
 #      东财代理同量级）；误差随交易日累积（累计净值未按再投资复利计息）。
 #   2) 每周：ypingcn.com 内嵌与 S&P 官网一致的周频官方点位，自动校正一次——
 #      清除官方末点之后（含同日）的推算日频点、只保留官方周频数据，再从最新
@@ -927,30 +1122,45 @@ def fetch_sp_weights():
 
 
 def fetch_wind_history(code, last_saved_date, last_saved_value=None):
-    """获取万得微盘股指数（8841431.WI）的最新收盘（推算口径）。
+    """获取微盘股指数（868008.WI）的最新收盘。
 
-    依据代理指数的每日涨跌幅倒推，填充锚点之后的所有交易日。
-    优先东方财富「微盘股」板块指数（90.BK1158，日均绝对误差约 0.09 个百分点），
-    被限流时回退到同花顺「微盘股」板块指数（883418，日均绝对误差约 0.28 个百分点）。
-    短期倒推可靠；误差会随交易日累积，属"大致推算"口径，可接受。
-    只返回晚于本地已保存日期的交易日。
+    首选 Wind 官方日频 API（准确值，无推算误差）：从本地末点回退 5 天起取数，
+    返回的点会就地覆盖已有值，因此上一次运行若留下推算值，这次能用官方值自愈。
+    Wind 通道不可用（未配置 Key、鉴权失败、额度不足、网络异常）时，自动回退到
+    代理指数倒推：以 2026-11-05（万得官方数据最后一天）为固定锚点，按同花顺
+    「微盘股」板块指数（883418）涨跌幅外推，同花顺异常时再退到东方财富
+    90.BK1158 兜底。倒推误差随交易日累积，属"大致推算"口径。
     """
+    try:
+        if wind_configured() and last_saved_date:
+            begin = (datetime.strptime(last_saved_date, "%Y-%m-%d")
+                     - timedelta(days=5)).strftime("%Y-%m-%d")
+            data = wind_index_kline(code, begin, now_cn().strftime("%Y-%m-%d"))
+            fresh = {d: round(v, 2) for d, v in data.items() if d >= last_saved_date}
+            if fresh:
+                latest = max(fresh)
+                print(f"微盘股指数{code}：Wind 官方日频取到 {len(fresh)} 个交易日，最新 {latest} / {fresh[latest]:.2f}")
+                return fresh
+            print(f"微盘股指数{code}：Wind 官方接口无 {last_saved_date} 之后的新数据。")
+    except Exception as e:
+        print(f"⚠️ 微盘股指数{code} Wind 官方接口失败，回退推算口径: {e}")
+
     result = {}
     if last_saved_value is not None:
-        result = _extrapolate_wind_from_bk1158(last_saved_date, last_saved_value)
+        result = _extrapolate_wind_from_ths(last_saved_date, last_saved_value)
         if not result:
-            result = _extrapolate_wind_from_ths(last_saved_date, last_saved_value)
+            result = _extrapolate_wind_from_bk1158(last_saved_date, last_saved_value)
     if result:
         latest = max(result)
-        print(f"万得微盘股指数{code}：本次推算 {len(result)} 个新交易日，最新 {latest} / {result[latest]:.2f}")
+        print(f"微盘股指数{code}：本次推算 {len(result)} 个新交易日，最新 {latest} / {result[latest]:.2f}")
     return result
 
 
 EASTMONEY_KLINE_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
-# 东方财富「微盘股」板块指数，作为万得微盘股（868008.WI）每日涨幅的近似代理
+# 东方财富「微盘股」板块指数，作为微盘股（868008.WI）每日涨幅的近似代理
 WIND_PROXY_SECID = "90.BK1158"
-# 同花顺「微盘股」板块指数（883418），作为万得微盘股（8841431.WI）每日涨幅的备用代理。
-# 实测与万得微盘日涨跌幅相关系数约 0.982、日均绝对误差约 0.28 个百分点，短期倒推可靠。
+# 同花顺「微盘股」板块指数（883418），作为微盘股（868008.WI）每日涨幅的备用代理。
+# 实测与微盘日涨跌幅相关系数约 0.982、日均绝对误差约 0.28 个百分点，短期倒推可靠。
 # 当东财 push2 系列行情接口被数据中心 IP 拦截（403）时启用此备用源。
 THS_KLINE_URL = "https://d.10jqka.com.cn/v6/line/bk_883418/01/last.js"
 THS_HEADERS = {
@@ -958,10 +1168,10 @@ THS_HEADERS = {
     "Referer": "http://stockpage.10jqka.com.cn/",
     "Cookie": "v=AAAAAAAAAAAA; hexin-v=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 }
-# PB 水位区间（万得微盘日频等权 8841431.WI 近10年 PB 的最低/最高，据用户提供的准确数据）
+# PB 水位区间（微盘日频等权 868008.WI 近10年 PB 的最低/最高，据用户提供的准确数据）
 WIND_PB_MIN, WIND_PB_MAX = 1.3429, 5.2516
 
-# 西部证券《微盘周报》：每周发布，公开可抓，正文含「万得微盘股指数成分股 PB 中位数」
+# 西部证券《微盘周报》：每周发布，公开可抓，正文含「微盘股指数成分股 PB 中位数」
 SINA_REPORT_LIST = "https://stock.finance.sina.com.cn/stock/go.php/vReport_List/kind/search/index.phtml"
 SINA_REPORT_SHOW = "https://stock.finance.sina.com.cn/stock/go.php/vReport_Show/kind/search/rptid/{rptid}/index.phtml"
 SINA_HEADERS = {"User-Agent": "Mozilla/5.0", "Referer": "https://stock.finance.sina.com.cn/"}
@@ -1000,7 +1210,7 @@ def _parse_report_date(text):
 
 
 def fetch_wind_pb_from_report():
-    """从西部证券《微盘周报》抓取万得微盘股指数 PB 中位数（每周更新一次）。
+    """从西部证券《微盘周报》抓取微盘股指数 PB 中位数（每周更新一次）。
 
     链路：新浪研报标题搜索「微盘周报」→ 取最新一期 → 解析正文里的
     「微盘股指数成分股pb中位数」与「截至YYYY年MM月DD日」。
@@ -1044,8 +1254,178 @@ def fetch_wind_crowding_from_report():
     return mcap, turnover, d
 
 
+# ===== 微盘股每日估值自算（PB / 市值中位数） =====
+# 万得 868008 的官方 PB、市值中位数只更新到 2026-11-05；此后每个交易日由脚本自算。
+# 数据源用腾讯行情全市场快照（一次 60 只批量），不依赖任何成分股名单：
+# 直接按总市值升序取前 400 只（剔除 ST/PT/退市/停牌），与万得「市值最小的 400 只」选样一致。
+TENCENT_QUOTE_URL = "https://qt.gtimg.cn/q="
+# 自算整体法 PB（Σ总市值 / Σ净资产）与万得加权 PB 的口径校准系数：
+# 2026-11-05 实测 Wind 2.0287 / 自算 1.9748 = 1.0273。仅用于消除口径系统差，避免曲线跳变。
+MICRO_PB_CALIB = 1.0273
+MICRO_TOP_N = 400
+# 官方数据（Wind 868008）最后覆盖日；该日及之前一律用官方值，自算从次一交易日起生效。
+MICRO_OFFICIAL_END = "2026-11-05"
+
+
+def _tencent_batch(batch):
+    """取一批股票（最多 60 只）的 名称/总市值/市净率/现价/成交量。"""
+    try:
+        resp = _request_with_retry(TENCENT_QUOTE_URL + ",".join(batch),
+                                   headers=TENCENT_HEADERS, timeout=15)
+        resp.encoding = "gbk"
+        out = []
+        for line in resp.text.split(";"):
+            if "=" not in line:
+                continue
+            f = line.split("=", 1)[1].strip().strip('"').split("~")
+            if len(f) < 48:
+                continue
+            name = f[1]
+            try:
+                price = float(f[3] or 0)
+                vol = float(f[6] or 0)
+                mc = float(f[45])   # 总市值（亿元）
+                pb = float(f[46])   # 市净率
+            except (TypeError, ValueError):
+                continue
+            upper = name.upper()
+            if mc <= 0 or pb <= 0 or price <= 0 or vol <= 0:
+                continue
+            if "ST" in upper or "PT" in upper or "退" in name or "N" in upper or "C" in upper or "U" in upper:
+                continue
+            out.append((name, mc, pb))
+        return out
+    except Exception:
+        return []
+
+
+def fetch_micro_valuation_snapshot():
+    """全市场快照 -> 万得微盘股口径的 (PB, 市值中位数)。
+
+    PB 用法：Σ总市值 / Σ(总市值/市净率)，即整体法；再乘校准系数对齐万得加权 PB。
+    返回 {"pb": float, "mcap": float, "n": int}，抓取不足时返回 None。
+    """
+    codes = []
+    for lo, hi in ((600000, 604000), (605000, 606000), (688000, 689000)):
+        codes += [f"sh{i}" for i in range(lo, hi)]
+    codes += [f"sz{i:06d}" for i in range(1, 4000)]
+    codes += [f"sz{i}" for i in range(300000, 303000)]
+    batches = [codes[i:i + 60] for i in range(0, len(codes), 60)]
+
+    rows = []
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for part in pool.map(_tencent_batch, batches):
+            rows.extend(part)
+    if len(rows) < 3000:
+        print(f"微盘估值自算：仅取到 {len(rows)} 只，疑似行情源异常，跳过本次更新。")
+        return None
+
+    rows.sort(key=lambda x: x[1])
+    top = rows[:MICRO_TOP_N]
+    pbs = [r[2] for r in top]
+    mcap_med = float(np.median([r[1] for r in top]))
+    pb_agg = sum(r[1] for r in top) / sum(r[1] / r[2] for r in top)
+    print(f"微盘估值自算：{len(rows)} 只中取最小 {len(top)} 只，"
+          f"整体PB {pb_agg:.4f}（校准后 {pb_agg * MICRO_PB_CALIB:.4f}），市值中位 {mcap_med:.2f} 亿元")
+    return {"pb": round(pb_agg * MICRO_PB_CALIB, 4), "mcap": round(mcap_med, 2), "n": len(top)}
+
+
+def _apply_micro_daily(data_obj, trade_date):
+    """写入当日 PB / 市值中位数到 pb_daily、mcap_daily（同日覆盖），并同步估值表。
+
+    首选 Wind 官方加权 PB 与成份股总市值中位数（一次接口调用同时取到）；
+    Wind 不可用时回退：官方区间内跳过，之后用全市场市值最小 400 只自算。
+    """
+    snap = None
+    source = ""
+    if wind_configured():
+        try:
+            wv = wind_index_valuation("868008.WI", trade_date)
+            if wv and wv.get("pb"):
+                # 接口未按指定日期返回（拿到的是上一交易日）时不予采信，避免把旧值当当日值
+                if wv.get("date") and wv["date"] != trade_date:
+                    print(f"微盘估值：Wind 返回日期 {wv['date']} 与目标 {trade_date} 不符，本次不采用。")
+                elif wv.get("mcap") is None:
+                    print("微盘估值：Wind 未返回市值中位数，本次不采用。")
+                else:
+                    snap = {"pb": wv["pb"], "mcap": wv["mcap"], "pe": wv.get("pe")}
+                    source = "Wind 官方（868008.WI 加权PB）"
+        except Exception as e:
+            print(f"⚠️ 微盘估值：Wind 官方接口失败，改走自算: {e}")
+
+    if snap is None:
+        if trade_date <= MICRO_OFFICIAL_END:
+            print(f"微盘估值：{trade_date} 仍在官方数据区间（≤{MICRO_OFFICIAL_END}），跳过。")
+            return False
+        snap = fetch_micro_valuation_snapshot()
+        if not snap:
+            return False
+        source = "脚本自算·全市场市值最小400只"
+
+    changed = False
+
+    # 当日指数点位（用于图右侧点位线）
+    point = None
+    if trade_date in data_obj.get("dates", []):
+        point = data_obj["values"][data_obj["dates"].index(trade_date)]
+
+    pbd = data_obj.get("pb_daily")
+    if pbd is not None:
+        if pbd["dates"] and pbd["dates"][-1] == trade_date:
+            if abs(pbd["pb"][-1] - snap["pb"]) > 0.0005:
+                pbd["pb"][-1] = snap["pb"]
+                pbd["point"][-1] = point
+                changed = True
+        elif not pbd["dates"] or trade_date > pbd["dates"][-1]:
+            pbd["dates"].append(trade_date)
+            pbd["pb"].append(snap["pb"])
+            pbd["point"].append(point)
+            changed = True
+
+    md = data_obj.get("mcap_daily")
+    if md is None:
+        md = data_obj["mcap_daily"] = {"dates": [], "value": [], "point": []}
+    if md["dates"] and md["dates"][-1] == trade_date:
+        if abs(md["value"][-1] - snap["mcap"]) > 0.005:
+            md["value"][-1] = snap["mcap"]
+            md["point"][-1] = point
+            changed = True
+    elif not md["dates"] or trade_date > md["dates"][-1]:
+        md["dates"].append(trade_date)
+        md["value"].append(snap["mcap"])
+        md["point"].append(point)
+        changed = True
+
+    val = data_obj.setdefault("valuation", {})
+    # 分位样本一律取「近 10 年」。pb_daily 已覆盖 2016-11 起的日频，直接用；
+    # 若历史尚未补齐（点数过少），回退到「周频历史 + 近年日频」拼接，避免口径缩水。
+    daily_pb = list(pbd.get("pb") or []) if pbd else []
+    if len(daily_pb) >= 1500:
+        base = daily_pb
+    else:
+        base = [p for d, p in zip((data_obj.get("pb_weekly") or {}).get("dates", []),
+                                  (data_obj.get("pb_weekly") or {}).get("pb", []))
+                if d <= "2024-12-31"]
+        base += [p for d, p in zip(pbd["dates"], pbd["pb"]) if d >= "2025-01-01"] if pbd else []
+    pct = None
+    if base:
+        cur = snap["pb"]
+        pct = round(sum(1 for v in base if v <= cur) / len(base) * 100, 1)
+    if (val.get("pb") != snap["pb"] or val.get("data_date") != trade_date
+            or val.get("source") != source):
+        val["pb"] = snap["pb"]
+        val["pb_percentile_10y"] = pct
+        val["data_date"] = trade_date
+        val["weight_date"] = trade_date.replace("-", "")
+        val["source"] = source
+        changed = True
+    print(f"微盘估值已写入 {trade_date}：PB {snap['pb']}（分位 {pct}%），"
+          f"市值中位 {snap['mcap']} 亿元，来源 {source}")
+    return changed
+
+
 def _apply_wind_pb(data_obj):
-    """万得微盘 PB：从西部证券《微盘周报》抓取最新 PB 中位数并重算水位。
+    """微盘 PB：从西部证券《微盘周报》抓取最新 PB 中位数并重算水位。
 
     每周新报告出来后，若「截至日期」晚于页面内记录，则更新 PB 与水位；
     抓取失败或未出新报告时保持原值（不产生无意义提交）。
@@ -1056,7 +1436,7 @@ def _apply_wind_pb(data_obj):
     val = data_obj.get("valuation") or {}
     old_date = val.get("data_date") or ""
     if pb_date <= old_date:
-        print(f"万得微盘 PB：周报日期 {pb_date} 不新于已有 {old_date}，跳过。")
+        print(f"微盘 PB：周报日期 {pb_date} 不新于已有 {old_date}，跳过。")
         return False
     new_pct = round((pb - WIND_PB_MIN) / (WIND_PB_MAX - WIND_PB_MIN) * 100, 1)
     val["pb"] = pb
@@ -1064,7 +1444,7 @@ def _apply_wind_pb(data_obj):
     val["data_date"] = pb_date
     val["weight_date"] = pb_date.replace("-", "")
     val["source"] = "西部证券微盘周报·PB中位数"
-    print(f"万得微盘股指数PB 更新为 {pb}（{pb_date}，水位 {new_pct}%）")
+    print(f"微盘股指数PB 更新为 {pb}（{pb_date}，水位 {new_pct}%）")
 
     # 同步把新一周的 PB 追加到周度序列（微盘股仪表盘的 PB 图用），并裁剪到近10年
     pw = data_obj.get("pb_weekly")
@@ -1120,9 +1500,9 @@ def _apply_wind_crowding(data_obj):
 
 
 def _extrapolate_wind_from_bk1158(last_saved_date, last_saved_value):
-    """用东财微盘板块（BK1158）的每日涨跌幅倒推万得微盘股指数点位。
+    """用东财微盘板块（BK1158）的每日涨跌幅倒推微盘股指数点位。
 
-    实测：BK1158 与万得微盘的日涨跌幅平均绝对误差约 0.09 个百分点，短期倒推可靠；
+    实测：BK1158 与微盘的日涨跌幅平均绝对误差约 0.09 个百分点，短期倒推可靠；
     误差会随交易日累积，长期会逐步偏离真实值（推算口径，可接受）。
     """
     try:
@@ -1174,10 +1554,10 @@ def _extrapolate_wind_from_bk1158(last_saved_date, last_saved_value):
 
 
 def _extrapolate_wind_from_ths(last_saved_date, last_saved_value):
-    """用同花顺「微盘股」板块指数（883418）的每日涨跌幅倒推万得微盘股指数点位。
+    """用同花顺「微盘股」板块指数（883418）的每日涨跌幅倒推微盘股指数点位。
 
     该接口返回最近约 140 个交易日的日 K 线（JSONP），收盘价位于每行第 5 个字段。
-    仅填充锚点之后的新交易日；实测与万得微盘日涨跌幅相关系数约 0.982，
+    仅填充锚点之后的新交易日；实测与微盘日涨跌幅相关系数约 0.982，
     短期倒推可靠；误差会随交易日累积，属"大致推算"口径，可接受。
     """
     try:
@@ -1910,72 +2290,99 @@ def update_html(file_path):
             elif source == "CNI":
                 recent_data = fetch_cni_history(code)
             elif source == "SP":
-                # 标普指数：平时按 515450 累计净值日频推算；每周用 ypingcn 的
-                # 官方周频点位校正——清除官方末点之后的推算日频点、只保留官方
-                # 周频数据，再从最新官方点重新推算至今（漂移每周归零）。
-                try:
-                    official = _fetch_sp_official_weekly()
-                except Exception as e:
-                    official = {}
-                    # 失效标记写入 HTML：前端在指数页面展示提醒（用户不看 Actions 日志也能发现）
-                    err_today = now_cn().strftime("%Y-%m-%d")
-                    prev_err = all_data[name].get("sp_official_error")
-                    if not prev_err or prev_err.get("date") != err_today:
-                        all_data[name]["sp_official_error"] = {"date": err_today, "msg": str(e)[:200]}
-                        updated_any = True
-                    print(f"⚠️ 标普指数 ypingcn 官方周频抓取失败（本次全部按推算处理）: {e}")
-                else:
-                    # 恢复后自动清除失效标记
-                    if all_data[name].pop("sp_official_error", None) is not None:
-                        updated_any = True
-                        print("标普指数：ypingcn 官方周频校正已恢复，失效标记已清除。")
-                official_end = (
-                    all_data[name].get("sp_official_end")
-                    or (max(dates) if dates else None)
-                )
-                # 清除官方数据末点之后的推算日频点
-                drop = [i for i, d in enumerate(dates) if official_end and d > official_end]
-                if drop:
-                    keep = set(range(len(dates))) - set(drop)
-                    dates = [dates[i] for i in sorted(keep)]
-                    values = [values[i] for i in sorted(keep)]
-                    sp_corrected = True
-                    print(f"标普指数：清除官方末点 {official_end} 之后的 {len(drop)} 个推算日频点。")
-                # 官方周频点就地覆盖/追加。注意用 >=：与官方末点同日的值如果是
-                # 上次运行残留的推算值（例如上次官方抓取失败、本次才恢复），
-                # 也要被官方值覆盖，否则官方末点只增不减会把同日推算值永久锁死
-                if official:
-                    for d, v in sorted(official.items()):
-                        if official_end is None or d >= official_end:
-                            if d in dates:
-                                idx0 = dates.index(d)
-                                if abs(values[idx0] - v) > 0.001:
-                                    old_v = values[idx0]
-                                    values[idx0] = v
-                                    sp_corrected = True
-                                    print(f"标普指数：官方点覆盖 {d} 推算值 {old_v} → {v}。")
-                            else:
-                                dates.append(d)
-                                values.append(v)
+                # 首选 Wind 官方日频（SPCLLHCT.SPI 标普中国A股大盘红利低波50全收益）：
+                # 准确点位，不再依赖 515450 累计净值推算，也不必等 ypingcn 的周频校正。
+                # 接口不可用时回退原逻辑：515450 净值日频推算 + ypingcn 周频校正。
+                wind_done = False
+                if wind_configured():
+                    try:
+                        begin = ((datetime.strptime(last_saved_date, "%Y-%m-%d")
+                                  - timedelta(days=5)).strftime("%Y-%m-%d")
+                                 if last_saved_date else "2015-01-01")
+                        data = wind_index_kline(SP_WINDCODE, begin, now_cn().strftime("%Y-%m-%d"))
+                        if data:
+                            recent_data = {d: round(v, 2) for d, v in data.items()
+                                           if not last_saved_date or d >= last_saved_date}
+                            newest = max(data)
+                            if all_data[name].get("sp_official_end") != newest:
+                                all_data[name]["sp_official_end"] = newest
                                 sp_corrected = True
-                    # 官方末点只增不减：即使本次无新周点也落盘，
-                    # 防止个别运行抓取失败后误把官方历史日频当推算点清除
-                    prev_end = all_data[name].get("sp_official_end")
-                    new_end = max(max(official), prev_end or "")
-                    if new_end != prev_end:
-                        all_data[name]["sp_official_end"] = new_end
+                            if all_data[name].pop("sp_official_error", None) is not None:
+                                sp_corrected = True
+                            wind_done = True
+                            print(f"标普指数：Wind 官方日频取到 {len(recent_data)} 个交易日，"
+                                  f"最新 {newest} / {data[newest]:.2f}")
+                        else:
+                            print("标普指数：Wind 官方接口未返回数据。")
+                    except Exception as e:
+                        print(f"⚠️ 标普指数 Wind 官方接口失败，回退 515450 推算: {e}")
+                if not wind_done:
+                    # 标普指数：平时按 515450 累计净值日频推算；每周用 ypingcn 的
+                    # 官方周频点位校正——清除官方末点之后的推算日频点、只保留官方
+                    # 周频数据，再从最新官方点重新推算至今（漂移每周归零）。
+                    try:
+                        official = _fetch_sp_official_weekly()
+                    except Exception as e:
+                        official = {}
+                        # 失效标记写入 HTML：前端在指数页面展示提醒（用户不看 Actions 日志也能发现）
+                        err_today = now_cn().strftime("%Y-%m-%d")
+                        prev_err = all_data[name].get("sp_official_error")
+                        if not prev_err or prev_err.get("date") != err_today:
+                            all_data[name]["sp_official_error"] = {"date": err_today, "msg": str(e)[:200]}
+                            updated_any = True
+                        print(f"⚠️ 标普指数 ypingcn 官方周频抓取失败（本次全部按推算处理）: {e}")
+                    else:
+                        # 恢复后自动清除失效标记
+                        if all_data[name].pop("sp_official_error", None) is not None:
+                            updated_any = True
+                            print("标普指数：ypingcn 官方周频校正已恢复，失效标记已清除。")
+                    official_end = (
+                        all_data[name].get("sp_official_end")
+                        or (max(dates) if dates else None)
+                    )
+                    # 清除官方数据末点之后的推算日频点
+                    drop = [i for i, d in enumerate(dates) if official_end and d > official_end]
+                    if drop:
+                        keep = set(range(len(dates))) - set(drop)
+                        dates = [dates[i] for i in sorted(keep)]
+                        values = [values[i] for i in sorted(keep)]
                         sp_corrected = True
-                    print(f"标普指数：官方周频数据校正至 {all_data[name]['sp_official_end']}。")
-                all_data[name]["dates"] = dates
-                all_data[name]["values"] = values
-                # 从最新末点（官方周点或官方历史末点）起重新推算日频
-                recent_data = _extrapolate_sp_from_fund(
-                    max(dates) if dates else None, values[-1] if values else None)
+                        print(f"标普指数：清除官方末点 {official_end} 之后的 {len(drop)} 个推算日频点。")
+                    # 官方周频点就地覆盖/追加。注意用 >=：与官方末点同日的值如果是
+                    # 上次运行残留的推算值（例如上次官方抓取失败、本次才恢复），
+                    # 也要被官方值覆盖，否则官方末点只增不减会把同日推算值永久锁死
+                    if official:
+                        for d, v in sorted(official.items()):
+                            if official_end is None or d >= official_end:
+                                if d in dates:
+                                    idx0 = dates.index(d)
+                                    if abs(values[idx0] - v) > 0.001:
+                                        old_v = values[idx0]
+                                        values[idx0] = v
+                                        sp_corrected = True
+                                        print(f"标普指数：官方点覆盖 {d} 推算值 {old_v} → {v}。")
+                                else:
+                                    dates.append(d)
+                                    values.append(v)
+                                    sp_corrected = True
+                        # 官方末点只增不减：即使本次无新周点也落盘，
+                        # 防止个别运行抓取失败后误把官方历史日频当推算点清除
+                        prev_end = all_data[name].get("sp_official_end")
+                        new_end = max(max(official), prev_end or "")
+                        if new_end != prev_end:
+                            all_data[name]["sp_official_end"] = new_end
+                            sp_corrected = True
+                        print(f"标普指数：官方周频数据校正至 {all_data[name]['sp_official_end']}。")
+                    all_data[name]["dates"] = dates
+                    all_data[name]["values"] = values
+                    # 从最新末点（官方周点或官方历史末点）起重新推算日频
+                    recent_data = _extrapolate_sp_from_fund(
+                        max(dates) if dates else None, values[-1] if values else None)
             elif source == "US":
                 # 美股指数（如纳斯达克100）：腾讯行情日 K 最近 60 个交易日，逐日合并
                 recent_data = fetch_us_history(code, last_saved_date)
             else:  # WIND
-                # 万得微盘为推算口径：固定锚点（准确数据最后一天）+ 代理指数最新收盘，
+                # 微盘为推算口径：固定锚点（准确数据最后一天）+ 代理指数最新收盘，
                 # 每次重推锚点之后的全部交易日并覆盖旧值。这样即便某次运行抓到了
                 # 代理源盘后未定稿的坏值，下次运行也会自动纠正，不会持续累积误差。
                 anchor = all_data[name].get("wind_anchor")
@@ -2029,12 +2436,14 @@ def update_html(file_path):
             update_index_calculations(all_data[name])
             updated_any = True
 
-        # 万得微盘（推算）：PB 同步为西部证券周报最新准确值并重算水位
+        # 微盘（推算）：PB 同步为西部证券周报最新准确值并重算水位
         if source == "WIND":
-            if _apply_wind_pb(all_data[name]):
+            # 官方 PB 已停用（西部证券周报中位数口径），改为每个交易日用全市场快照自算
+            # Wind 加权 PB 与市值中位数，官方值截至 2026-11-05，此后为自算口径。
+            if _apply_micro_daily(all_data[name], all_data[name]["dates"][-1]):
                 updated_any = True
-            if _apply_wind_crowding(all_data[name]):
-                updated_any = True
+            # 市值中位数历史（周报口径）已固化，2026-11-05 起由 _apply_micro_daily 每日自算，不再追加周报值
+
 
         # 同步对应 ETF 的最新收盘价，并重算「各回撤分位线 -> ETF 价格」的换算结果
         etf_meta = ETF_CONFIG.get(name)
