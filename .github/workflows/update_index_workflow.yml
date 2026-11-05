@@ -1,17 +1,9 @@
 name: 更新全收益指数数据
 
 on:
-  # 保留手动触发入口
+  # 仅手动触发：仓库 Actions 页面 → 本工作流 → Run workflow
+  # 已移除全部 schedule 定时任务，不再自动运行，避免空跑消耗 Wind 积分。
   workflow_dispatch:
-  # 北京时间工作日 21:30（UTC 13:30）自动跑，覆盖 A 股收盘后数据更新时段
-  schedule:
-    - cron: '30 13 * * 1-5'
-    # 北京时间次日早上 7:30（UTC 23:30，周二~周六）补跑一次：
-    # 1) 个别指数（如中证 H20955 红利低波100全收益）当天数据落库较晚，
-    #    21:30 抓取时可能缺失最新交易日；增量窗口为前 14 天，此次运行会自动补齐。
-    # 2) 美股指数（如纳斯达克100）收盘约在北京时间次日 04:00~05:00，本次运行
-    #    正好抓取其最终收盘点位（21:30 运行时美股尚在盘中，脚本会跳过未定稿的当日 K 线）。
-    - cron: '30 23 * * 2-6'
 
 permissions:
   contents: write
@@ -29,7 +21,8 @@ jobs:
       - name: 设置 Python 环境
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          # 与本地开发环境（Python 3.11 + pandas 3.x）保持一致，避免版本差异导致的取数异常
+          python-version: '3.11'
 
       - name: 安装计算依赖
         run: |
@@ -45,14 +38,19 @@ jobs:
           WIND_API_KEY: ${{ secrets.WIND_API_KEY }}
         run: python -u auto_update_indices.py
 
-      - name: 提交并推送更新后的网页
+      - name: 提交并推送更新后的文件
         run: |
-          if git diff --quiet -- 指数全收益定投策略.html; then
+          # 检测全部变更（网页 + 脚本可能同步调整），无变化则直接结束
+          if git diff --quiet; then
             echo "未检测到新的交易日数据、指标或 ETF 价格变化。"
             exit 0
           fi
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
-          git add 指数全收益定投策略.html
+          # 明确列出交付文件，避免把运行时产物（如 __pycache__）一并提交
+          git add 指数分析工具.html auto_update_indices.py 配置说明.md
           git commit -m "chore: 自动更新全收益指数点位、ETF 分位线价格与估值分位 [skip ci]"
-          git push
+          if ! git push; then
+            echo "::warning::推送失败：若仓库 main 分支开启了保护，请在 Settings → Branches 关闭保护，或改用个人访问令牌（PAT）授权推送。"
+            exit 0
+          fi
