@@ -8,6 +8,7 @@ from bisect import bisect_left
 from datetime import date, datetime, timedelta, timezone
 import time
 import os
+import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
@@ -280,10 +281,53 @@ def valuation_metrics(name):
         return {"dy"}
     return set()
 
-# 本次运行内 Wind 通道是否已被判定不可用（鉴权失败/额度不足等），避免每个指数重复试错
-_WIND_STATE = {"ok": True, "reason": ""}
+# ===== Wind 调用的重试与熔断策略 =====
+# Wind MCP 网关偶发超时、返回空响应、SSE 被截断都很常见，绝大多数重试一次就能拿到。
+# 直接回退的话，那项数据就停在上一交易日/免费源，只能靠人工重跑一次 Action 来补，
+# 代价远高于在本地多重试几次。
+WIND_MAX_ATTEMPTS = 3           # 瞬时故障（5xx/429/空响应/SSE 截断）的总尝试次数
+WIND_TIMEOUT_ATTEMPTS = 2       # 超时类只多试 1 次：每次都要等满 timeout，成本太高
+WIND_RETRY_DELAYS = (3, 8)      # 第 1、2 次重试前的等待秒数（指数退避，避免打到同一个坏节点）
+WIND_CONNECT_TIMEOUT = 15       # 连接超时单独设短：网络不通时快速失败，而不是干等 180s
+WIND_MAX_CONSECUTIVE_FAILS = 2  # 连续几个调用彻底失败即熔断当轮 Wind，防止网关宕机拖死流程
+WIND_FAIL_TIME_BUDGET = 240     # 本轮因失败累计耗时上限（秒），超过即熔断
+
+# 本次运行内 Wind 通道是否已被判定不可用（鉴权失败/额度不足/连续失败等），避免每个指数重复试错
+_WIND_STATE = {"ok": True, "reason": "", "consecutive_fail": 0, "failed_seconds": 0.0}
 # 本次运行的 Wind 调用计数（工具名 -> 次数），结束时打印，便于核对积分消耗
 _WIND_USAGE = {}
+# 本轮取数失败清单：{工具｜参数: (原因, 类型)}。类型 retry = 瞬时故障（值得自动补抓一轮），
+# fatal = 参数类错误（补抓也没用，只为提示）
+_WIND_FAILURES = {}
+
+# 自动补抓用的环境变量：子进程里置 1，保证「整轮补抓」最多只做一次，不会无限递归
+WIND_AUTO_RETRY_ENV = "WIND_AUTO_RETRY_ROUND"
+WIND_AUTO_RETRY_DELAY = 30      # 补抓前等待秒数，给网关留出恢复时间
+
+
+def _record_wind_failure(tool_name, params, reason, kind="retry"):
+    """登记一处取数失败（同一请求只记一次），供结束时汇总与自动补抓判断。"""
+    key = f"{tool_name}｜{json.dumps(params, ensure_ascii=False)[:90]}"
+    _WIND_FAILURES.setdefault(key, (str(reason)[:140], kind))
+
+
+def wind_has_retryable_failure():
+    """是否有值得再跑一轮的失败：只认瞬时故障，参数类错误补也没用。"""
+    return any(kind == "retry" for _reason, kind in _WIND_FAILURES.values())
+
+
+def wind_failures_report():
+    """汇总本轮未取到的 Wind 数据：打印清单，并在 Actions 里打一条黄色告警。"""
+    if not _WIND_FAILURES:
+        return
+    print(f"\n⚠️ 本轮有 {len(_WIND_FAILURES)} 处 Wind 取数未成功，"
+          f"对应数据已回退到免费源或上一交易日：")
+    for key, (reason, _kind) in _WIND_FAILURES.items():
+        print(f"   • {key}｜{reason}")
+    print("   这些数据下次运行会自动补齐；若想立刻补齐，再点一次 Run workflow 即可。")
+    # 这一行会被 GitHub Actions 渲染成黄色告警，比在一大堆日志里翻更醒目
+    print(f"::warning::Wind 取数有 {len(_WIND_FAILURES)} 处失败，"
+          f"部分估值/点位已回退，建议再运行一次补齐")
 
 
 def wind_usage_report():
@@ -301,8 +345,91 @@ def wind_configured():
     return bool(WIND_API_KEY) and _WIND_STATE["ok"]
 
 
+def _parse_wind_response(resp):
+    """解析 Wind MCP 网关响应，并判断这次失败值不值得重试。
+
+    返回 (status, text)：
+      ok     —— 成功（text 为工具输出，允许空字符串：该区间本来就没有数据）
+      retry  —— 瞬时故障：5xx/429/空响应/SSE 被截断/限流，重试通常即可成功
+      auth   —— 鉴权失败，整轮停用 Wind
+      quota  —— 积分或额度不足，整轮停用 Wind
+      fatal  —— 其它业务错误（参数不对等），重试无意义
+    """
+    if resp.status_code != 200:
+        if resp.status_code in (401, 403):
+            return "auth", f"HTTP {resp.status_code}"
+        if resp.status_code == 402:
+            return "quota", "HTTP 402（积分不足）"
+        if resp.status_code >= 500 or resp.status_code == 429:
+            return "retry", f"HTTP {resp.status_code}"
+        return "fatal", f"HTTP {resp.status_code}"
+
+    # 服务端返回 SSE（text/event-stream），requests 对这类响应默认按
+    # Latin-1 解码，中文会变乱码，必须强制 UTF-8。
+    resp.encoding = "utf-8"
+    body = resp.text or ""
+    if not body.strip():
+        return "retry", "返回空响应"
+
+    msg = None
+    # 正常取数走 SSE；出错时（如积分余额不足）服务端直接回普通 JSON，两种格式都要能解析，
+    # 否则真实原因会被「空响应」掩盖。
+    if body.lstrip().startswith("{"):
+        try:
+            msg = json.loads(body)
+        except json.JSONDecodeError:
+            msg = None
+    if msg is None:
+        # 响应体较大时单个 JSON 会被拆成多条 data: 行，按 SSE 规范用换行拼接后再解析。
+        events, cur = [], []
+        for ln in body.splitlines():
+            if ln.startswith("data:"):
+                cur.append(ln[5:].lstrip())
+            elif not ln.strip() and cur:
+                events.append(cur)
+                cur = []
+        if cur:
+            events.append(cur)
+        if not events:
+            return "retry", "返回空响应"
+        for chunk in ("\n".join(events[0]), "".join(events[0])):
+            try:
+                msg = json.loads(chunk)
+                break
+            except json.JSONDecodeError:
+                continue
+    if msg is None:
+        # SSE 被截断或拼接失败：重试一次基本就能恢复
+        return "retry", "响应内容无法解析为 JSON"
+
+    if msg.get("error"):
+        err = msg["error"]
+        text = (json.dumps(err, ensure_ascii=False) if isinstance(err, dict)
+                else str(err))[:200]
+        low = text.lower()
+        if any(k in low for k in ("rate limit", "too many", "限流", "频率", "busy", "timeout")):
+            return "retry", text
+        return "fatal", text
+
+    result = msg.get("result") or {}
+    content = result.get("content") or [{}]
+    text = (content[0] or {}).get("text", "") or ""
+    if result.get("isError"):
+        # 积分余额不足 / 额度用尽等账户级问题：本次运行整体停用 Wind 通道
+        code = (result.get("structuredContent") or {}).get("code")
+        if code == 402 or any(k in text for k in ("余额不足", "积分", "额度", "余额")):
+            return "quota", text[:200]
+        return "fatal", text[:200] or "Wind 工具返回错误"
+    return "ok", text
+
+
 def _wind_call(tool_name, params, timeout=120):
-    """调用 Wind MCP 网关上的数据工具，返回其文本结果；失败抛异常。"""
+    """调用 Wind MCP 网关上的数据工具，返回其文本结果；失败抛异常。
+
+    瞬时故障（超时、5xx、429、空响应、SSE 截断）按指数退避重试：
+    这类抖动多半重试一次就能拿到，比直接回退、再人工重跑一次 Action 划算得多。
+    鉴权失败与积分不足不重试，直接熔断当轮 Wind 通道。
+    """
     if not WIND_API_KEY:
         raise RuntimeError("未配置 WIND_API_KEY")
     payload = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -311,75 +438,64 @@ def _wind_call(tool_name, params, timeout=120):
                                         "arguments": json.dumps(params, ensure_ascii=False)}}}
     headers = {"Authorization": "Bearer " + WIND_API_KEY,
                "Accept": "application/json, text/event-stream"}
-    last_error = None
-    for attempt in range(3):
+
+    last_error = "未知错误"
+    attempt = 0
+    max_attempts = WIND_MAX_ATTEMPTS
+    while attempt < max_attempts:
+        attempt += 1
+        started = time.monotonic()
         try:
-            resp = requests.post(WIND_MCP_URL, json=payload, headers=headers, timeout=timeout)
-            if resp.status_code != 200:
-                last_error = f"HTTP {resp.status_code}"
-                # 401/403 是 Key 或权限问题，重试无意义，直接整轮禁用该通道
-                if resp.status_code in (401, 403):
-                    _WIND_STATE.update(ok=False, reason=last_error)
-                    raise RuntimeError(f"Wind 鉴权失败（{last_error}），本次改用推算口径")
-                if 400 <= resp.status_code < 500:
-                    break
-            else:
-                # 服务端返回 SSE（text/event-stream），requests 对这类响应默认按
-                # Latin-1 解码，中文会变乱码，必须强制 UTF-8。
-                resp.encoding = "utf-8"
-                body = resp.text
-                msg = None
-                # 正常取数走 SSE；出错时（如积分余额不足）服务端直接回普通 JSON，
-                # 两种格式都要能解析，否则真实原因会被"空响应"掩盖。
-                if body.lstrip().startswith("{"):
-                    try:
-                        msg = json.loads(body)
-                    except json.JSONDecodeError:
-                        msg = None
-                if msg is None:
-                    # 响应体较大时单个 JSON 会被拆成多条 data: 行，按 SSE 规范用换行拼接后再解析。
-                    events, cur = [], []
-                    for ln in body.splitlines():
-                        if ln.startswith("data:"):
-                            cur.append(ln[5:].lstrip())
-                        elif not ln.strip() and cur:
-                            events.append(cur)
-                            cur = []
-                    if cur:
-                        events.append(cur)
-                    if not events:
-                        raise RuntimeError("Wind 返回空响应")
-                    for chunk in ("\n".join(events[0]), "".join(events[0])):
-                        try:
-                            msg = json.loads(chunk)
-                            break
-                        except json.JSONDecodeError:
-                            continue
-                if msg is None:
-                    raise RuntimeError("Wind 返回内容无法解析为 JSON")
-                if msg.get("error"):
-                    raise RuntimeError(str(msg["error"])[:200])
-                result = msg.get("result") or {}
-                content = result.get("content") or [{}]
-                text = content[0].get("text", "")
-                if result.get("isError"):
-                    # 积分余额不足 / 额度用尽等账户级问题：本次运行整体停用 Wind 通道
-                    code = (result.get("structuredContent") or {}).get("code")
-                    if code == 402 or any(
-                            k in text for k in ("余额不足", "积分", "额度", "余额")):
-                        _WIND_STATE.update(
-                            ok=False,
-                            reason=f"Wind 账户积分余额不足（{text[:80]}）")
-                        raise RuntimeError(
-                            f"Wind 积分余额不足，本次改用其他数据源（官网/推算）：{text[:120]}")
-                    raise RuntimeError(text[:200] or "Wind 工具返回错误")
-                _WIND_USAGE[tool_name] = _WIND_USAGE.get(tool_name, 0) + 1
-                return text
+            resp = requests.post(WIND_MCP_URL, json=payload, headers=headers,
+                                 timeout=(WIND_CONNECT_TIMEOUT, timeout))
+            status, text = _parse_wind_response(resp)
+        except requests.Timeout:
+            # 超时要等满 timeout 才返回，重试成本高，只多试一次
+            status, text = "retry", f"请求超时（等待 {timeout}s 无响应）"
+            max_attempts = min(max_attempts, WIND_TIMEOUT_ATTEMPTS)
         except requests.RequestException as e:
-            last_error = str(e)
-        if attempt < 2:
-            time.sleep(2)
-    raise requests.RequestException(str(last_error))
+            # 连接被拒 / DNS 失败等，通常很快返回，按普通瞬时故障处理
+            status, text = "retry", f"{type(e).__name__}: {str(e)[:120]}"
+
+        if status == "ok":
+            _WIND_STATE["consecutive_fail"] = 0
+            _WIND_USAGE[tool_name] = _WIND_USAGE.get(tool_name, 0) + 1
+            return text
+
+        if status == "auth":
+            _WIND_STATE.update(ok=False, reason=f"鉴权失败（{text}）")
+            raise RuntimeError(f"Wind 鉴权失败（{text}），本次改用免费/推算口径")
+
+        if status == "quota":
+            _WIND_STATE.update(ok=False, reason=f"积分不足（{text[:80]}）")
+            raise RuntimeError(
+                f"Wind 积分余额不足，本次改用其他数据源（官网/推算）：{text[:120]}")
+
+        if status == "fatal":
+            # 参数类错误重试也没用；只影响这一项，不熔断整轮，也不触发自动补抓
+            _record_wind_failure(tool_name, params, text, kind="fatal")
+            raise RuntimeError(text)
+
+        # status == "retry"
+        last_error = text
+        _WIND_STATE["failed_seconds"] += time.monotonic() - started
+        if attempt < max_attempts:
+            delay = WIND_RETRY_DELAYS[min(attempt - 1, len(WIND_RETRY_DELAYS) - 1)]
+            print(f"   ↻ Wind {tool_name} 第 {attempt} 次尝试失败（{text}），{delay}s 后重试")
+            time.sleep(delay)
+
+    # 重试耗尽：登记失败清单，并在连续失败/超时预算耗尽时熔断当轮 Wind
+    _WIND_STATE["consecutive_fail"] += 1
+    _record_wind_failure(tool_name, params, last_error)
+    if (_WIND_STATE["consecutive_fail"] >= WIND_MAX_CONSECUTIVE_FAILS
+            or _WIND_STATE["failed_seconds"] >= WIND_FAIL_TIME_BUDGET):
+        _WIND_STATE.update(
+            ok=False,
+            reason=f"连续 {_WIND_STATE['consecutive_fail']} 次失败（{last_error[:60]}）")
+        print(f"⚠️ Wind 通道连续失败 {_WIND_STATE['consecutive_fail']} 次"
+              f"（累计耗时 {_WIND_STATE['failed_seconds']:.0f}s），"
+              f"本轮剩余数据改用免费源/推算，不再继续空等。")
+    raise requests.RequestException(f"Wind 调用失败（{tool_name}）：{last_error}")
 
 
 def wind_index_kline(windcode, begin_date, end_date):
@@ -2682,13 +2798,23 @@ def fetch_index_metrics(all_data=None):
 
 def update_html(file_path):
     print(f"正在处理文件: {file_path}")
-    if not os.path.exists(file_path): return
+    # 文件缺失必须显式报错：以前这里静默 return，会让 Action 显示「成功」但页面
+    # 一个字都没更新（例如把网页改过名、却没同步改脚本里的文件名）。
+    if not os.path.exists(file_path):
+        siblings = sorted(p for p in os.listdir(".") if p.lower().endswith((".html", ".htm")))
+        hint = (f"同目录下现有的网页文件：{'、'.join(siblings)}" if siblings
+                else "当前目录下没有任何 .html 文件")
+        raise FileNotFoundError(
+            f"未找到网页文件「{file_path}」（当前目录 {os.getcwd()}；{hint}）。"
+            f"请确认仓库里的文件名与 update_html() 的参数一致。")
 
     with open(file_path, 'r', encoding='utf-8') as f:
         content = f.read()
 
     match = re.search(r'let allData = (\{.*?\});', content, re.DOTALL)
-    if not match: return
+    if not match:
+        raise ValueError(f"网页「{file_path}」中找不到内嵌数据块 let allData = {{...}};，"
+                         f"无法写回数据，请确认文件未被破坏。")
     all_data = json.loads(match.group(1))
     updated_any = False
 
@@ -3061,6 +3187,35 @@ def update_html(file_path):
     else:
         print("ℹ️ 所有数据及指标已是最新。")
     wind_usage_report()
+    wind_failures_report()
+
+def main(html_file="指数分析工具.html"):
+    """跑一轮完整更新；若有 Wind 瞬时故障就等一会儿自动补抓一轮（最多一次）。"""
+    if os.environ.get(WIND_AUTO_RETRY_ENV) == "1":
+        print("\n" + "=" * 64)
+        print("🔁 自动补抓轮：上一轮有 Wind 瞬时故障，本轮重新取一遍缺失数据")
+        print("=" * 64)
+    try:
+        update_html(html_file)
+    except Exception:
+        # 任何未被兜住的异常：先把本轮已发生的 Wind 失败打出来（正常路径由
+        # update_html 结尾统一打印），再原样抛出，保证 Actions 能正确标红。
+        wind_failures_report()
+        raise
+
+    # 自动补抓：本轮存在「瞬时故障」导致的缺失、且 Wind 通道仍可用时，等一会儿再整体
+    # 跑一轮（最多一次）。这样偶发抖动不用人工再点一次 Run workflow。
+    # 写回逻辑是增量的，补抓只会把缺的那几天补上，不会重复拉历史。
+    if (wind_has_retryable_failure() and wind_configured()
+            and os.environ.get(WIND_AUTO_RETRY_ENV) != "1"):
+        print(f"\n⏳ 本轮有 {len(_WIND_FAILURES)} 处 Wind 瞬时故障，"
+              f"等 {WIND_AUTO_RETRY_DELAY}s 后自动补抓一轮（仅补一次）…")
+        sys.stdout.flush()
+        time.sleep(WIND_AUTO_RETRY_DELAY)
+        env = dict(os.environ, **{WIND_AUTO_RETRY_ENV: "1"})
+        os.execve(sys.executable,
+                  [sys.executable, "-u", os.path.abspath(__file__)], env)
+
 
 if __name__ == "__main__":
-    update_html("指数分析工具.html")
+    main()
