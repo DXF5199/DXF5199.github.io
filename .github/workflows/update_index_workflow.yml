@@ -14,6 +14,9 @@ env:
 jobs:
   update-data:
     runs-on: ubuntu-latest
+    # 保险丝：正常一轮 2~3 分钟；脚本内部已有 Wind 熔断（连续失败/累计 240s），
+    # 即使网关彻底不可用也不会超过这个上限，避免异常时白占 6 小时。
+    timeout-minutes: 20
     steps:
       - name: 检出代码库
         uses: actions/checkout@v4
@@ -40,15 +43,32 @@ jobs:
 
       - name: 提交并推送更新后的文件
         run: |
-          # 检测全部变更（网页 + 脚本可能同步调整），无变化则直接结束
-          if git diff --quiet; then
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+
+          # 逐个添加交付文件。仓库里可能没有「配置说明.md」（辅助文档，不是运行必需）：
+          # git add 一次列多个文件时，只要有一个路径在仓库里不存在，整条命令就会
+          # 以 exit 128 失败（fatal: pathspec ... did not match any files），
+          # 后面的 commit / push 全都不会执行。所以这里逐个判断存在性再添加。
+          for f in 指数分析工具.html auto_update_indices.py 配置说明.md; do
+            if [ -e "$f" ]; then
+              git add -- "$f"
+            else
+              echo "提示：仓库中没有 $f，已跳过"
+            fi
+          done
+
+          # 兜底：脚本若新建了文件（例如首次生成的网页）也一并纳入提交，
+          # 但排除 Python 运行时产物，避免把 __pycache__ 提交进仓库。
+          git add -A -- . ':(exclude)**/__pycache__' ':(exclude)**/*.pyc' || true
+
+          # 用「暂存区 vs HEAD」判断是否有变更：既能识别已跟踪文件的修改，
+          # 也能识别新增/删除的文件（git diff --quiet 检测不到未跟踪文件）。
+          if git diff --cached --quiet; then
             echo "未检测到新的交易日数据、指标或 ETF 价格变化。"
             exit 0
           fi
-          git config user.name 'github-actions[bot]'
-          git config user.email 'github-actions[bot]@users.noreply.github.com'
-          # 明确列出交付文件，避免把运行时产物（如 __pycache__）一并提交
-          git add 指数分析工具.html auto_update_indices.py 配置说明.md
+
           git commit -m "chore: 自动更新全收益指数点位、ETF 分位线价格与估值分位 [skip ci]"
           if ! git push; then
             echo "::warning::推送失败：若仓库 main 分支开启了保护，请在 Settings → Branches 关闭保护，或改用个人访问令牌（PAT）授权推送。"
