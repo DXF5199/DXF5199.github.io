@@ -3,6 +3,8 @@ name: 更新全收益指数数据
 on:
   # 仅手动触发：仓库 Actions 页面 → 本工作流 → Run workflow
   # 已移除全部 schedule 定时任务，不再自动运行，避免空跑消耗 Wind 积分。
+  # 标普红利低波50 的成份股/权重/总市值/申万行业在脚本内按 ISO 周缓存，
+  # 同一周内反复运行也只在当周第一次调用 Wind（权重 1 次 + 行业 2 次）。
   workflow_dispatch:
 
 permissions:
