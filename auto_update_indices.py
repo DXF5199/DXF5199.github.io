@@ -87,9 +87,9 @@ VALUATION_CONFIG = {
     "成长100全收益": ("480080", "CNI"),
     "中证科技100全收益": ("931187", "CSI"),
     "中证2000全收益": ("932000", "CSI"),
-    # 标普指数不公开成分股权重（需 SPICE 账号），用跟踪 ETF（515450）的
-    # 中报/年报全持仓近似（≈指数成分股，滞后一个报告期）；行业分布无
-    # 可靠申万个股映射源，留空。
+    # 标普官方不公开指数权重文件（需 SPICE 账号）：成份股/权重/总市值/申万行业
+    # 一律走 Wind（见 WIND_COMPONENT_INDICES），按 ISO 周缓存、每周只刷一次省积分；
+    # 515450 全持仓仅作 Wind 失败时的回退（滞后一个报告期，且是占净值比）。
     "标普红利低波50全收益": ("515450", "SP"),
 }
 
@@ -1454,6 +1454,10 @@ def _fetch_sp_official_weekly():
 def fetch_sp_weights():
     """从天天基金 jjcc 接口解析跟踪 ETF（515450）最新一期「全持仓」明细。
 
+    **仅在 Wind 取不到标普指数权重时作回退**（Wind 正常时这条路径不会执行）：
+    标普道琼斯不公开权重文件，515450 的中报/年报全持仓是唯一免费近似，
+    但它滞后一个报告期，且披露的是「占基金净值比」而非指数权重。
+
     季报只披露前十大，中报/年报为全持仓（50 只 ≈ 指数成分股），
     取股票数最多的报告期。返回 ([(symbol, 名称, 权重%, None)], 权重日期)。
     """
@@ -2323,7 +2327,12 @@ def compute_weighted_dividend_yield(rows, quotes, denominator="valid",
 
 
 def build_market_cap_block(rows, quotes):
-    """按成分股总市值分档统计（大盘/中盘/小盘），复用已抓取的行情。"""
+    """按成分股总市值分档统计（大盘/中盘/小盘），复用已抓取的行情。
+
+    除算术平均外还算「加权市值」= Σ(指数权重 × 总市值) ÷ Σ权重：
+    它才是指数真实的市值暴露——等权指数两者相等，市值/股息率加权的指数会明显
+    偏向大市值（红利类尤其明显），用来看「整体偏大盘还是偏小盘」比算术平均准。
+    """
     caps = []
     for row in rows:
         symbol, weight = row[0], row[2]
@@ -2333,27 +2342,10 @@ def build_market_cap_block(rows, quotes):
         cap = _to_positive_float(fields[TENCENT_FIELD_MARKET_CAP])
         if cap is None:
             continue
-        caps.append((cap, weight))
+        caps.append((cap, _to_positive_float(weight) or 0.0))
     if not caps:
         return {}
-    total = sum(c for c, _ in caps)
-    buckets = []
-    for label, low, high in MARKET_CAP_BUCKETS:
-        picked = [
-            (c, w) for c, w in caps
-            if (low is None or c >= low) and (high is None or c < high)
-        ]
-        buckets.append({
-            "name": label,
-            "count": len(picked),
-            "weight": round(sum(w for _, w in picked), 2),
-        })
-    return {
-        "total": round(total, 2),              # 成分股合计总市值（亿元）
-        "average": round(total / len(caps), 2),  # 平均市值（亿元）
-        "count": len(caps),
-        "buckets": buckets,
-    }
+    return _summarize_market_cap(caps)
 
 
 def _wind_code_value_map(doc, key_hint="市值"):
@@ -2376,6 +2368,17 @@ def _wind_code_value_map(doc, key_hint="市值"):
     return out
 
 
+def _components_cache_ok(cached, week_key):
+    """本周缓存能否直接复用：必须是 Wind 取的权重，且刷新周是本周。
+
+    ETF 回退结果（source=etf）即使标了本周也不能复用——否则一次 Wind 失败
+    会把 515450 的滞后持仓锁死一整周，下周之前都不会再尝试 Wind。
+    """
+    return bool(cached.get("rows")
+                and cached.get("refreshed_week") == week_key
+                and (cached.get("source") or "wind") == "wind")
+
+
 def wind_index_components(name):
     """取指数成份股（代码 / 简称 / 权重）与各股总市值，返回 (rows, mcap, weight_date)。
 
@@ -2390,6 +2393,7 @@ def wind_index_components(name):
                 f"指数权重(%)、总市值(亿元)")
     doc = json.loads(_wind_call("get_financial_data", {"question": question}, timeout=180))
     rows, mcap, weight_date = [], {}, None
+    dropped = 0
     for blk in (doc.get("data") or {}).get("data") or []:
         names = [c.get("name", "") for c in blk.get("columns") or []]
         for row in blk.get("rows") or []:
@@ -2400,6 +2404,12 @@ def wind_index_components(name):
             try:
                 weight = float(rec.get("指数成份权重"))
             except (TypeError, ValueError):
+                continue
+            # 剔除零权重/负权重：Wind 会把调样过渡期已摘出、或曾属成分的个股一并列出
+            # （实测 2026-11 标普列表尾部挂着一只权重 0.00% 的贵州茅台）。
+            # 这类行没有权重贡献，却会把总市值和成分股只数算大 8%。
+            if weight <= 0:
+                dropped += 1
                 continue
             rows.append((str(sym), str(rec.get("指数成份简称") or ""), weight))
             try:
@@ -2417,6 +2427,15 @@ def wind_index_components(name):
             mcap = {**mcap, **_wind_code_value_map(doc2, "市值")}
         except Exception as e:
             print(f"⚠️ {name}：成分股总市值补充查询失败（{str(e)[:60]}）")
+    if rows:
+        wsum = sum(w for _, _, w in rows)
+        print(f"{name}：Wind 成份股 {len(rows)} 只，权重合计 {wsum:.2f}%，"
+              f"总市值覆盖 {len(mcap)}/{len(rows)}（权重日 {weight_date or '—'}）"
+              + (f"，剔除零权重 {dropped} 只" if dropped else ""))
+        # 自检：指数权重合计应接近 100。明显偏离说明 Wind 回的是「ETF 占净值比」
+        # 或只回了部分成份，此时代码不能当指数权重用，交由上层回退免费源。
+        if not (90 <= wsum <= 110):
+            raise ValueError(f"Wind 权重合计 {wsum:.2f}% 异常（应接近 100%），疑似非指数权重")
     return rows, mcap, weight_date
 
 
@@ -2460,10 +2479,27 @@ def wind_index_industry(name, weight_date=None):
 
 def build_market_cap_from_map(rows, mcap):
     """用 {代码: 总市值(亿元)} 与成份股权重做市值分档，口径同 build_market_cap_block。"""
-    pairs = [(mcap[s], w) for s, _, w in rows if s in mcap]
+    pairs = [(mcap[s], _to_positive_float(w) or 0.0) for s, _, w in rows if s in mcap]
+    if not pairs:
+        return {}
+    return _summarize_market_cap(pairs)
+
+
+def _summarize_market_cap(pairs):
+    """把 [(总市值亿元, 权重%)] 汇总成 {total, average, weighted, weight_sum, count, buckets}。
+
+    weighted = Σ(权重 × 市值) ÷ Σ权重，即指数按自身权重配置后的「每单位权重的平均市值」；
+    weight_sum 是参与计算的权重合计，<100 说明部分样本缺市值（页面据此标注覆盖率）。
+
+    零权重行（调样过渡期残留）在这里统一剔除：它们对加权市值没有贡献，
+    却会把总市值和成分股只数算大（标普曾因此把总市值多算 1.8 万亿）。
+    """
+    pairs = [(c, w) for c, w in pairs if w > 0]
     if not pairs:
         return {}
     total = sum(c for c, _ in pairs)
+    weight_sum = sum(w for _, w in pairs)
+    weighted = (sum(c * w for c, w in pairs) / weight_sum) if weight_sum else None
     buckets = []
     for label, low, high in MARKET_CAP_BUCKETS:
         picked = [
@@ -2476,8 +2512,10 @@ def build_market_cap_from_map(rows, mcap):
             "weight": round(sum(w for _, w in picked), 2),
         })
     return {
-        "total": round(total, 2),
-        "average": round(total / len(pairs), 2),
+        "total": round(total, 2),                 # 成分股合计总市值（亿元）
+        "average": round(total / len(pairs), 2),   # 算术平均市值（亿元）
+        "weighted": round(weighted, 2) if weighted is not None else None,  # 加权平均市值（亿元）
+        "weight_sum": round(weight_sum, 2),        # 参与计算的权重合计（%）
         "count": len(pairs),
         "buckets": buckets,
     }
@@ -2669,10 +2707,15 @@ def fetch_index_metrics(all_data=None):
         if all_data:
             cached_industry = (((all_data.get(name) or {}).get("profile") or {})
                                .get("industry") or {})
-        if cached_industry.get("items") and cached_industry.get("refreshed_week") == week_key:
+        # 命中条件只看刷新周，不要求 items 非空：取数失败时也会写入一条带
+        # refreshed_week 的空记录，本周内不再反复重试（下周自动重试），省积分。
+        if cached_industry.get("refreshed_week") == week_key:
             industry = cached_industry
-            print(f"{name}：行业分布本周已刷新（{cached_industry.get('refreshed_at') or '—'}），"
-                  f"沿用上次结果")
+            if cached_industry.get("items"):
+                print(f"{name}：行业分布本周已刷新（{cached_industry.get('refreshed_at') or '—'}），"
+                      f"沿用上次结果")
+            else:
+                print(f"{name}：行业分布本周已尝试但未取到，本周跳过（下周自动重试）")
         weight_date = trade_date
         # 只有需要「官方加权 PB」的指数才调用 Wind 估值接口（成长100R / 中证科技100 /
         # 中证2000），其余指数一律用中证/国证官网权重 + 个股行情自算，不耗积分。
@@ -2684,27 +2727,46 @@ def fetch_index_metrics(all_data=None):
         elif name in FREE_ONLY_INDICES:
             print(f"{name}：点位/成份股用中证官网免费数据（不耗积分）")
 
-        # 成份股：默认走中证/国证官网权重文件（免费）；标普的 515450 持仓滞后一期，
-        # 改用 Wind 的实时成份股。标普调样不频繁，成份股/市值也按 ISO 周缓存，
-        # 同一周内重复运行直接沿用上次结果，省掉 1 次 get_financial_data。
+        # 成份股：默认走中证/国证官网权重文件（免费）；标普官方不公开权重文件、
+        # 515450 的持仓又滞后一个报告期且是「占净值比」而非指数权重，因此改用 Wind
+        # 的实时指数成份股。标普半年才调样一次，成份股/市值/行业一律按 ISO 周缓存：
+        # 同一周内重复运行（哪怕一天跑好几次）不再调用 Wind，一周固定只花
+        # 1 次 get_financial_data（权重+市值）+ 2 次（申万一级/二级行业）。
         cached_components = {}
         if all_data:
             cached_components = (((all_data.get(name) or {}).get("profile") or {})
                                  .get("components") or {})
         components_reused = False
+        components_from_wind = False
         if name in WIND_COMPONENT_INDICES and wind_configured() and name in WIND_CODES:
-            if (cached_components.get("rows")
-                    and cached_components.get("refreshed_week") == week_key):
+            # 只有「Wind 取的、且是本周的」缓存才复用。回退到 515450 的那次结果
+            # 也存进 components（前端据此标注口径），但 source=etf，下次运行必须
+            # 重新尝试 Wind——否则一次失败会把 ETF 权重锁死一整周。
+            cache_ok = _components_cache_ok(cached_components, week_key)
+            if cache_ok:
                 rows = cached_components["rows"]
                 mcap = cached_components.get("mcap") or {}
                 weight_date = cached_components.get("weight_date") or trade_date
                 components_reused = True
+                components_from_wind = True
                 print(f"{name}：Wind 成份股本周已刷新（{cached_components.get('refreshed_at') or '—'}），"
-                      f"沿用上次结果")
+                      f"沿用上次结果（本周不再调用 Wind）")
+                # 权重命中缓存但行业没取到（上次行业调用失败）时补一次：否则会掉到
+                # 「免费行业源」分支——标普没有免费源，画像行业分布会一直空白。
+                if not industry:
+                    try:
+                        industry = wind_index_industry(name, weight_date) or {
+                            "items": [], "levels": {}, "date": weight_date,
+                            "source": "Wind（申万行业分类）· 本周取数失败"}
+                    except Exception as e:
+                        print(f"⚠️ {name}：行业分布补取失败（{str(e)[:60]}），本周跳过。")
+                        industry = {"items": [], "levels": {}, "date": weight_date,
+                                    "source": "Wind（申万行业分类）· 本周取数失败"}
             else:
                 try:
                     rows, mcap, wd = wind_index_components(name)
                     weight_date = wd or trade_date
+                    components_from_wind = bool(rows)
                     if not industry:
                         industry = wind_index_industry(name, weight_date)
                 except Exception as e:
@@ -2712,6 +2774,7 @@ def fetch_index_metrics(all_data=None):
                     rows, mcap = [], {}
 
         quotes = {}
+        market_cap = {}
         val_source = source
         if not rows:
             try:
@@ -2730,7 +2793,6 @@ def fetch_index_metrics(all_data=None):
         else:
             # 成份股来自 Wind（目前只有标普走这条）：估值来源标签随之改为 Wind 成份股
             val_source = "WIND"
-            market_cap = build_market_cap_from_map(rows, mcap)
 
         # 股息率沿用原口径：按成分股（指数权重）算术加权，不用 Wind 直接给的加权值。
         # Wind 成份股代码是 600000.SH 形式，需转成腾讯行情代码再抓个股行情。
@@ -2740,6 +2802,12 @@ def fetch_index_metrics(all_data=None):
             except Exception as e:
                 print(f"⚠️ {name}：成份股行情抓取失败，股息率留空: {str(e)[:60]}")
                 quotes = {}
+        # 市值口径统一用腾讯行情，与其它指数保持一致；Wind 的 mcap 只在行情缺失时兜底。
+        # 不能直接用 Wind 的「总市值」：它是 A 股股本口径，A+H 公司会明显偏小
+        # （如中国移动 Wind 1.54 万亿 vs 腾讯 2.3 万亿），混用后加权市值与其他指数不可比。
+        if rows and not market_cap:
+            market_cap = (build_market_cap_block(rows, quotes) if quotes
+                          else (build_market_cap_from_map(rows, mcap) if mcap else {}))
         # 只算页面要展示的那一项：只展示 PB 的指数不再白算股息率，红利类不再算 PE/PB
         dy_calc, dy_valid = ((None, 0) if not want_dy or not quotes
                              else compute_weighted_dividend_yield(rows, quotes))
@@ -2788,20 +2856,25 @@ def fetch_index_metrics(all_data=None):
                 industry = build_industry_block(rows, code, source, weight_date, name)
             except Exception as e:
                 print(f"⚠️ {name} 行业分布计算失败: {e}")
-                industry = {}
+                # 写一条本周内的「失败占位」，避免同一天重复跑时反复抓同一个坏接口
+                industry = {"items": [], "levels": {}, "date": weight_date,
+                            "source": "行业分类取数失败"}
 
         # 本次新取的行业分布打上刷新周，下周同一周内直接复用
         if industry and industry is not cached_industry:
             industry["refreshed_week"] = week_key
             industry["refreshed_at"] = now_cn().strftime("%Y-%m-%d")
 
-        # 标普本次新取的成份股/市值打上刷新周，同一周内复用（省 Wind 调用）
+        # 标普本次新取的成份股/市值打上刷新周，同一周内复用（省 Wind 调用）。
+        # source 记录这份权重的真实出处：wind=Wind 实时指数权重（可整周复用）；
+        # etf=515450 全持仓占比（滞后一个报告期，仅当周展示，下次仍要重试 Wind）。
         components = {}
         if name in WIND_COMPONENT_INDICES and rows:
             components = cached_components if components_reused else {
                 "rows": rows,
                 "mcap": mcap,
                 "weight_date": weight_date,
+                "source": "wind" if components_from_wind else "etf",
                 "refreshed_week": week_key,
                 "refreshed_at": now_cn().strftime("%Y-%m-%d"),
             }
@@ -2825,8 +2898,10 @@ def fetch_index_metrics(all_data=None):
             bucket_text = " / ".join(
                 f"{b['name']} {b['count']}只" for b in market_cap["buckets"]
             )
+            weighted_text = (f"｜加权 {market_cap['weighted']:.2f} 亿"
+                             if market_cap.get("weighted") is not None else "")
             print(f"    市值分布：合计 {market_cap['total']/10000:.2f} 万亿｜"
-                  f"平均 {market_cap['average']:.2f} 亿｜{bucket_text}")
+                  f"算术平均 {market_cap['average']:.2f} 亿{weighted_text}｜{bucket_text}")
         if industry:
             level_keys = list((industry.get("levels") or {}).keys())
             extra = ""
