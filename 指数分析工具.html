@@ -95,6 +95,11 @@
         .bt-row label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
         .bt-row input[type=number] { width: 62px; background: #0d1117; color: #e6edf3; border: 1px solid #30363d; border-radius: 4px; padding: 3px 6px; font-size: 13px; font-family: inherit; color-scheme: dark; }
         .bt-row input[type=checkbox] { accent-color: #1f6feb; width: 15px; height: 15px; cursor: pointer; }
+        .bt-grp-tag {
+            display: inline-block; margin-left: 8px; padding: 1px 6px; border-radius: 4px;
+            font-size: 11px; font-weight: 600; color: #79c0ff;
+            background: rgba(56,139,253,0.14); border: 1px solid rgba(56,139,253,0.45);
+        }
         #bt-weight-sum.ok { color: #3fb950; }
         #bt-weight-sum.bad { color: #f85149; }
         #chart-backtest-nav { width: 100%; height: 380px; }
@@ -103,6 +108,72 @@
         #chart-backtest-excess { width: 100%; height: 300px; }
         #chart-backtest-rolling { width: 100%; height: 320px; }
         .bt-num { width: 62px; background: #0d1117; color: #e6edf3; border: 1px solid #30363d; border-radius: 4px; padding: 3px 6px; font-size: 13px; font-family: inherit; color-scheme: dark; }
+        /* 再平衡：一级分类卡片 + 二级参数面板，避免五六个按钮挤成一排 */
+        .rebal-modes { display: flex; flex-wrap: wrap; gap: 10px; }
+        .rebal-mode {
+            display: block; text-align: left; cursor: pointer;
+            flex: 1 1 0; min-width: 180px; max-width: 360px;
+            background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+            padding: 8px 12px; font-family: inherit; transition: border-color .15s, background .15s;
+        }
+        .rebal-mode:hover { border-color: #484f58; background: #1c2128; }
+        .rebal-mode.active { border-color: #1f6feb; background: rgba(56,139,253,0.12); }
+        .rebal-mode-title { display: block; font-size: 12.5px; font-weight: 600; color: #c9d1d9; }
+        .rebal-mode.active .rebal-mode-title { color: #79c0ff; }
+        .rebal-mode-sub { display: block; font-size: 11px; color: #8b949e; margin-top: 3px; line-height: 1.45; }
+        .rebal-sub {
+            margin-top: 10px; padding: 10px 12px; background: #0d1117;
+            border: 1px solid #21262d; border-radius: 8px;
+            display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+        }
+        .rebal-sub-label { font-size: 12px; color: #8b949e; }
+        .rebal-hint { font-size: 11.5px; color: #8b949e; }
+        /* 偏离度再平衡：口径切换 + 分组判断 */
+        .dev-groups { width: 100%; margin-top: 2px; padding-top: 10px; border-top: 1px dashed #21262d; }
+        .dev-groups-head { font-size: 11.5px; color: #8b949e; margin-bottom: 8px; line-height: 1.6; }
+        .dev-group-rows { display: flex; flex-wrap: wrap; gap: 8px 10px; }
+        .dev-group-item {
+            display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: #c9d1d9;
+            background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 4px 8px;
+        }
+        .dev-group-item.grp-on { border-color: #1f6feb; background: rgba(56,139,253,0.10); }
+        .dev-group-item select {
+            background: #0d1117; color: #e6edf3; border: 1px solid #30363d; border-radius: 4px;
+            font-size: 12px; font-family: inherit; padding: 2px 4px; color-scheme: dark; cursor: pointer;
+        }
+        .dev-group-item.grp-on select { border-color: #1f6feb; color: #79c0ff; }
+        .dev-group-summary { font-size: 11.5px; color: #8b949e; margin-top: 9px; line-height: 1.75; }
+        .dev-group-summary b { color: #79c0ff; font-weight: 600; }
+        .dev-group-summary .dev-trigger { color: #d29922; }
+        .rebal-note { font-size: 11.5px; color: #8b949e; line-height: 1.6; margin-top: 8px; width: 100%; }
+        /* 「添加指数」下拉选择：点加号展开候选列表，替代原先一整片挤在一起的按钮 */
+        .idx-pick { position: relative; display: inline-block; }
+        .idx-pick-btn { display: inline-flex; align-items: center; gap: 7px; }
+        .idx-pick-btn .caret { font-size: 10px; color: #8b949e; transition: transform .15s; }
+        .idx-pick.open .idx-pick-btn { border-color: #1f6feb; color: #79c0ff; background: rgba(56,139,253,0.12); }
+        .idx-pick.open .idx-pick-btn .caret { transform: rotate(180deg); color: #79c0ff; }
+        .idx-pick-menu {
+            position: absolute; left: 0; top: calc(100% + 6px); z-index: 80;
+            width: 300px; max-width: 84vw; box-sizing: border-box;
+            background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+            box-shadow: 0 14px 30px rgba(1,4,9,0.6); padding: 8px; display: none;
+        }
+        .idx-pick.open .idx-pick-menu { display: block; }
+        .idx-pick-search {
+            width: 100%; box-sizing: border-box; background: #0d1117; color: #e6edf3;
+            border: 1px solid #30363d; border-radius: 6px; padding: 5px 8px;
+            font-size: 12.5px; font-family: inherit; margin-bottom: 6px; color-scheme: dark;
+        }
+        .idx-pick-search:focus { outline: none; border-color: #1f6feb; }
+        .idx-pick-list { max-height: 256px; overflow-y: auto; }
+        .idx-pick-item {
+            display: block; width: 100%; box-sizing: border-box; text-align: left;
+            background: transparent; border: 0; border-radius: 5px; color: #c9d1d9;
+            font-size: 13px; font-family: inherit; padding: 6px 9px; cursor: pointer;
+            transition: background .12s, color .12s;
+        }
+        .idx-pick-item:hover, .idx-pick-item.hl { background: rgba(56,139,253,0.18); color: #e6edf3; }
+        .idx-pick-empty { font-size: 12.5px; color: #8b949e; padding: 8px 9px; line-height: 1.6; }
         .bt-table { width: 100%; border-collapse: collapse; font-size: 12.5px; color: #c9d1d9; }
         .bt-table th, .bt-table td { border: 1px solid #21262d; padding: 4px 8px; text-align: right; white-space: nowrap; }
         .bt-table th { background: #161b22; color: #8b949e; font-weight: 600; }
@@ -836,7 +907,7 @@
     <div id="page-backtest" class="page-content">
         <div class="dashboard-heading">
             <h2>指数回测工具</h2>
-            <p id="bt-tab-desc">选择指数并分配权重（合计 100%）、设置各指数的年跟踪误差，再选定回测区间与再平衡频率，查看组合收益曲线与历史回撤。</p>
+            <p id="bt-tab-desc">选择指数并分配权重（合计 100%）、设置各指数的年跟踪误差，再选定回测区间与再平衡方式（按时间定期、按权重偏离度、或手动择时），查看组合收益曲线与历史回撤。</p>
         </div>
 
         <div class="view-switch" style="margin-bottom:16px;">
@@ -848,8 +919,11 @@
         <div class="chart-box">
             <div class="chart-title">① 添加指数、分配权重与年跟踪误差</div>
             <div style="margin:6px 0;">
-                <button class="btn" id="bt-add-btn" onclick="toggleBtPicker()">➕ 添加指数</button>
-                <div id="bt-picker" style="display:none; margin-top:8px; padding:10px; border:1px solid #30363d; border-radius:6px; background:#0d1117; flex-wrap:wrap; gap:8px;"></div>
+                <div class="idx-pick" id="bt-pick">
+                    <button class="btn idx-pick-btn" id="bt-add-btn" onclick="toggleIdxPicker('bt', event)"
+                            aria-haspopup="listbox" aria-expanded="false" title="展开候选指数列表">➕ 添加指数 <span class="caret">▾</span></button>
+                    <div class="idx-pick-menu" id="bt-picker" role="listbox" aria-label="可添加的指数"></div>
+                </div>
             </div>
             <div id="bt-index-rows"></div>
             <div id="bt-weight-sum" style="margin-top:10px;font-size:13px;color:#8b949e;"></div>
@@ -872,22 +946,59 @@
                 <span style="font-size:12px;color:#8b949e;margin-left:14px;">比较基准</span>
                 <select id="bt-benchmark" class="date-input" style="height:auto;min-width:150px;"></select>
             </div>
-            <div class="selector" id="bt-rebalance" style="margin-top:12px;flex-wrap:wrap;align-items:center;">
-                <span style="font-size:12px;color:#8b949e;">再平衡</span>
-                <button class="btn" data-freq="monthly" onclick="setBtFreq('monthly', this)">月平衡</button>
-                <button class="btn" data-freq="quarterly" onclick="setBtFreq('quarterly', this)">季平衡</button>
-                <button class="btn active" data-freq="semiannual" onclick="setBtFreq('semiannual', this)">半年平衡</button>
-                <button class="btn" data-freq="annual" onclick="setBtFreq('annual', this)">年平衡</button>
-                <button class="btn" data-freq="manual" onclick="setBtFreq('manual', this)" title="按你主观择时的年月进行再平衡，每个时点在该月首个交易日调仓">手动择时</button>
-            </div>
-            <div id="bt-manual-panel" style="display:none;margin-top:10px;padding:10px;border:1px solid #30363d;border-radius:6px;background:#0d1117;">
-                <div style="font-size:12px;color:#8b949e;margin-bottom:6px;">添加你主观择时的再平衡时点（每个时点在该月的<b>首个交易日</b>执行调仓），可添加多个。每个时点可<b>重新指定各指数的持仓权重</b>（如成长过热时把 5:5 调成 7:3），留空则按初始权重：</div>
-                <div class="selector" style="flex-wrap:wrap;align-items:center;">
-                    <select id="bt-mr-y" class="date-input" style="height:auto;"></select><span style="color:#8b949e;">年</span>
-                    <select id="bt-mr-m" class="date-input" style="height:auto;"></select><span style="color:#8b949e;">月</span>
-                    <button class="btn" onclick="addBtManualRebal()">➕ 添加时点</button>
+            <div id="bt-rebalance" style="margin-top:14px;">
+                <div style="font-size:12px;color:#8b949e;margin-bottom:8px;">再平衡方式</div>
+                <!-- 一级：三种方式分类，选哪个展开哪组参数，避免六七个按钮挤成一排 -->
+                <div class="rebal-modes" id="bt-rebal-modes">
+                    <button class="rebal-mode active" data-mode="time" onclick="setBtMode('time', this)">
+                        <span class="rebal-mode-title">时间再平衡</span>
+                        <span class="rebal-mode-sub">按月 / 季 / 半年 / 年，到点调回目标权重</span>
+                    </button>
+                    <button class="rebal-mode" data-mode="threshold" onclick="setBtMode('threshold', this)">
+                        <span class="rebal-mode-title">偏离度再平衡</span>
+                        <span class="rebal-mode-sub">权重漂移超阈值才调回，可按组、按绝对或相对口径</span>
+                    </button>
+                    <button class="rebal-mode" data-mode="manual" onclick="setBtMode('manual', this)">
+                        <span class="rebal-mode-title">主观择时再平衡</span>
+                        <span class="rebal-mode-sub">在你指定的年月调仓，可改当期权重</span>
+                    </button>
                 </div>
-                <div id="bt-mr-list" style="margin-top:8px;"></div>
+                <div class="rebal-sub" id="bt-time-panel">
+                    <span class="rebal-sub-label">频率</span>
+                    <button class="btn" data-freq="monthly" onclick="setBtFreq('monthly', this)">月平衡</button>
+                    <button class="btn" data-freq="quarterly" onclick="setBtFreq('quarterly', this)">季平衡</button>
+                    <button class="btn active" data-freq="semiannual" onclick="setBtFreq('semiannual', this)">半年平衡</button>
+                    <button class="btn" data-freq="annual" onclick="setBtFreq('annual', this)">年平衡</button>
+                </div>
+                <div class="rebal-sub" id="bt-thresh-panel" style="display:none;">
+                    <div class="selector" style="flex-wrap:wrap;align-items:center;">
+                        <span class="rebal-sub-label">判断口径</span>
+                        <button class="btn btn-quick active" data-dev="abs" onclick="setBtDevMode('abs', this)"
+                                title="按实际权重与目标权重的绝对差（百分点）判断：5:5 设 10pp，某只涨到 60% 触发">绝对偏离</button>
+                        <button class="btn btn-quick" data-dev="rel" onclick="setBtDevMode('rel', this)"
+                                title="按相对目标权重的比例判断：5:5 设 10%，某只涨到 55%（50%×110%）触发">相对偏离</button>
+                        <span class="rebal-sub-label" style="margin-left:12px;">偏离阈值</span>
+                        <input type="number" id="bt-thresh" class="bt-num" value="" placeholder="如 10" min="1" max="50" step="1"
+                               oninput="onThreshInput();scheduleBtRun()"
+                               title="任一判断单元（单只指数或一个组）的偏离达到该值即触发再平衡"><span id="bt-thresh-unit" style="color:#8b949e;font-size:11.5px;margin-left:3px;line-height:1.4;">百分点</span>
+                        <span id="bt-thresh-hint" class="rebal-hint">按权重与目标的绝对差判断；例如填 10 时，5:5 组合某只涨到 60% 就调回</span>
+                    </div>
+                    <div class="dev-groups">
+                        <div class="dev-groups-head">分组判断（可选）：把几只同类指数设为同一组，就只按这一组的<b>合计权重</b>看偏离，组内不再单独触发；不分组则每只各自判断。</div>
+                        <div id="bt-group-rows" class="dev-group-rows"></div>
+                        <div id="bt-group-summary" class="dev-group-summary"></div>
+                    </div>
+                    <div class="rebal-note">阈值越大调仓越少、越能吃到趋势；越小越贴近目标权重、成本越高。任一判断单元越线即<b>全部</b>调回初始权重，统计行会给出实际触发次数与是哪个组触发的。</div>
+                </div>
+                <div class="rebal-sub" id="bt-manual-panel" style="display:none;">
+                    <div class="rebal-note" style="margin-top:0;margin-bottom:8px;">每个时点在该月<b>首个交易日</b>执行调仓，可添加多个。可为各指数填入新的目标权重（如成长过热时把 5:5 调成 7:3），留空则按初始权重：</div>
+                    <div class="selector" style="flex-wrap:wrap;align-items:center;">
+                        <select id="bt-mr-y" class="date-input" style="height:auto;"></select><span style="color:#8b949e;">年</span>
+                        <select id="bt-mr-m" class="date-input" style="height:auto;"></select><span style="color:#8b949e;">月</span>
+                        <button class="btn" onclick="addBtManualRebal()">➕ 添加时点</button>
+                    </div>
+                    <div id="bt-mr-list" style="margin-top:8px;"></div>
+                </div>
             </div>
             <div class="selector" style="margin-top:12px;flex-wrap:wrap;align-items:center;">
                 <span style="font-size:12px;color:#8b949e;">投入方式</span>
@@ -964,12 +1075,15 @@
             <div class="chart-box">
                 <div class="chart-title">① 添加指数、设置年跟踪误差与区间</div>
                 <div style="font-size:12.5px;color:#8b949e;margin:6px 0 10px;line-height:1.7;">
-                    点击「➕ 添加指数」加入要对比的指数，可为每个指数单独填写<b>年跟踪误差</b>（模拟对应指数基金的跟踪损耗，留空或填 0 = 指数本身）。
+                    点击「➕ 添加指数」在弹出的列表里选择要对比的指数（可直接输入关键词筛选），可为每个指数单独填写<b>年跟踪误差</b>（模拟对应指数基金的跟踪损耗，留空或填 0 = 指数本身）。
                     所有指标都在同一区间、同一批共同交易日上计算，口径完全一致。
                 </div>
                 <div style="margin:6px 0;">
-                    <button class="btn" id="cmp-add-btn" onclick="toggleCmpPicker()">➕ 添加指数</button>
-                    <div id="cmp-picker" style="display:none; margin-top:8px; padding:10px; border:1px solid #30363d; border-radius:6px; background:#0d1117; flex-wrap:wrap; gap:8px;"></div>
+                    <div class="idx-pick" id="cmp-pick">
+                        <button class="btn idx-pick-btn" id="cmp-add-btn" onclick="toggleIdxPicker('cmp', event)"
+                                aria-haspopup="listbox" aria-expanded="false" title="展开候选指数列表">➕ 添加指数 <span class="caret">▾</span></button>
+                        <div class="idx-pick-menu" id="cmp-picker" role="listbox" aria-label="可对比的指数"></div>
+                    </div>
                 </div>
                 <div id="cmp-index-rows"></div>
                 <div id="cmp-status" style="font-size:12.5px;color:#f85149;margin-top:8px;"></div>
@@ -1461,6 +1575,9 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
         let btNavChart = null, btDDChart = null, btReturnsChart = null;
         let btExcessChart = null, btRollingChart = null;
         let btFreq = 'semiannual';   // 默认半年平衡
+        let btDevMode = 'abs';       // 偏离度口径：abs=绝对（百分点）/ rel=相对（占目标权重的比例）
+        let btLastTimeFreq = 'semiannual';  // 记住上次选的时间频率，从偏离度/择时切回来时还原
+        let btHasRunOnce = false;    // 是否成功跑过一次：参数改动后自动重算的依据（btHasRun 会被空结果提示清掉）
         let btInvestMode = 'lump';   // 默认一次性投入
         let btRollingWindow = 756;   // 滚动窗口默认 3 年（交易日）
         let btHasRun = false;
@@ -1535,7 +1652,7 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
         }
 
         let btPicks = [];        // 已添加的指数 [{name, w, err}]
-        let btPickerOpen = false;
+        let openIdxPick = null;  // 当前展开的「添加指数」下拉：'bt' | 'cmp' | null
         let btYearInit = false;
 
         function renderBacktestConfig() {
@@ -1592,26 +1709,120 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
             renderBtRows();
         }
 
-        // 展开/收起「添加指数」面板：只列出尚未添加的指数
-        function toggleBtPicker() {
-            btPickerOpen = !btPickerOpen;
-            const el = document.getElementById('bt-picker');
-            if (btPickerOpen) {
-                const remain = indexNames.filter(n => !BENCHMARK_INDICES.includes(n) && !btPicks.some(p => p.name === n));
-                el.innerHTML = remain.length
-                    ? remain.map(n => '<button class="btn" style="margin:3px;" onclick="addBtIndex(\'' + n + '\')">' + n + '</button>').join('')
-                    : '<span style="color:#8b949e;">所有指数均已添加。</span>';
-                el.style.display = 'flex';
+        // ===== 「添加指数」下拉选择（组合回测 / 指数对比共用一套） =====
+        // kind: 'bt' 组合回测（候选里剔除基准指数）/ 'cmp' 指数对比（全部可选）
+        function idxPickEls(kind) {
+            return kind === 'cmp'
+                ? { wrap: document.getElementById('cmp-pick'), menu: document.getElementById('cmp-picker'), btn: document.getElementById('cmp-add-btn') }
+                : { wrap: document.getElementById('bt-pick'), menu: document.getElementById('bt-picker'), btn: document.getElementById('bt-add-btn') };
+        }
+
+        function idxPickPicks(kind) { return kind === 'cmp' ? cmpPicks : btPicks; }
+
+        function toggleIdxPicker(kind, ev) {
+            if (ev) ev.stopPropagation();          // 别让「点击外部关闭」的监听立刻把它收起来
+            if (openIdxPick === kind) { closeIdxPicker(); return; }
+            openIdxPicker(kind);
+        }
+
+        function openIdxPicker(kind) {
+            closeIdxPicker();
+            const { wrap, menu, btn } = idxPickEls(kind);
+            if (!wrap || !menu) return;
+            openIdxPick = kind;
+            // 搜索框固定不重渲染，避免每敲一个字就丢焦点；只重画下面的候选列表
+            menu.innerHTML = '<input type="text" class="idx-pick-search" placeholder="搜索指数…" autocomplete="off"'
+                + ' oninput="renderIdxPickList(\'' + kind + '\', this.value)"'
+                + ' onkeydown="idxPickKeydown(\'' + kind + '\', event)">'
+                + '<div class="idx-pick-list"></div>';
+            renderIdxPickList(kind, '');
+            wrap.classList.add('open');
+            if (btn) btn.setAttribute('aria-expanded', 'true');
+            const inp = menu.querySelector('.idx-pick-search');
+            if (inp) inp.focus();
+        }
+
+        function closeIdxPicker() {
+            if (!openIdxPick) return;
+            const { wrap, btn } = idxPickEls(openIdxPick);
+            if (wrap) wrap.classList.remove('open');
+            if (btn) btn.setAttribute('aria-expanded', 'false');
+            openIdxPick = null;
+        }
+
+        // 候选 = 全部指数 − 基准（仅组合回测）− 已添加 − 不匹配关键词
+        function idxPickRemain(kind, keyword) {
+            const picked = idxPickPicks(kind).map(p => p.name);
+            const kw = (keyword || '').trim().toLowerCase();
+            return indexNames.filter(n =>
+                !(kind === 'bt' && BENCHMARK_INDICES.includes(n))
+                && !picked.includes(n)
+                && (!kw || n.toLowerCase().includes(kw)));
+        }
+
+        function renderIdxPickList(kind, keyword) {
+            const { menu } = idxPickEls(kind);
+            const list = menu && menu.querySelector('.idx-pick-list');
+            if (!list) return;
+            const remain = idxPickRemain(kind, keyword);
+            if (remain.length) {
+                list.innerHTML = remain.map(n =>
+                    '<button type="button" class="idx-pick-item" role="option" data-name="' + n + '"'
+                    + ' onclick="pickIdxFromMenu(\'' + kind + '\', this.getAttribute(\'data-name\'))">' + n + '</button>').join('');
             } else {
-                el.style.display = 'none';
+                const kw = (keyword || '').trim();
+                list.innerHTML = '<div class="idx-pick-empty">'
+                    + (kw
+                        ? '没有匹配「' + kw.replace(/</g, '&lt;') + '」的指数。'
+                        : (kind === 'bt' ? '所有指数均已添加。' : '所有指数均已加入对比。'))
+                    + '</div>';
             }
         }
 
+        function pickIdxFromMenu(kind, name) {
+            if (!name) return;
+            if (kind === 'cmp') addCmpIndex(name); else addBtIndex(name);
+            closeIdxPicker();
+            const { btn } = idxPickEls(kind);
+            if (btn) btn.focus();     // 焦点回到按钮，接着点一次就能再加下一个
+        }
+
+        // 键盘操作：↑↓ 移动、Enter 选中、Esc 收起
+        function idxPickKeydown(kind, ev) {
+            const { menu, btn } = idxPickEls(kind);
+            const items = menu ? Array.from(menu.querySelectorAll('.idx-pick-item')) : [];
+            if (ev.key === 'Escape') {
+                ev.preventDefault(); closeIdxPicker();
+                if (btn) btn.focus();
+                return;
+            }
+            if (!items.length) return;
+            let idx = items.findIndex(it => it.classList.contains('hl'));
+            if (ev.key === 'ArrowDown') { ev.preventDefault(); idx = (idx + 1) % items.length; }
+            else if (ev.key === 'ArrowUp') { ev.preventDefault(); idx = idx <= 0 ? items.length - 1 : idx - 1; }
+            else if (ev.key === 'Enter') { ev.preventDefault(); (items[idx] || items[0]).click(); return; }
+            else return;
+            items.forEach(it => it.classList.remove('hl'));
+            items[idx].classList.add('hl');
+            items[idx].scrollIntoView({ block: 'nearest' });
+        }
+
+        // 点下拉以外的地方 / 按 Esc 收起
+        document.addEventListener('click', function (event) {
+            if (!openIdxPick) return;
+            const path = (typeof event.composedPath === 'function') ? event.composedPath() : [];
+            let inside = path.some(node => node && node.classList && node.classList.contains('idx-pick'));
+            if (!inside) {
+                const t = event.target;
+                if (t && t.isConnected === false) return;
+                if (t && t.closest) inside = !!t.closest('.idx-pick');
+            }
+            if (!inside) closeIdxPicker();
+        });
+
         function addBtIndex(name) {
             if (btPicks.some(p => p.name === name)) return;
-            btPicks.push({ name: name, w: '', err: '' });   // 权重/跟踪误差默认留空，待用户直接输入
-            btPickerOpen = false;
-            document.getElementById('bt-picker').style.display = 'none';
+            btPicks.push({ name: name, w: '', err: '', grp: '' });   // 权重/跟踪误差默认留空；grp 为空表示不分组
             const st = document.getElementById('bt-status');
             if (st) st.innerHTML = '';                      // 清掉上一次「请先添加指数」的提示
             renderBtRows();
@@ -1629,12 +1840,15 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
             const el = document.getElementById('bt-index-rows');
             el.innerHTML = btPicks.map((p, i) =>
                 '<div class="bt-row">'
-                + '<span style="font-weight:600;min-width:150px;">' + p.name + '</span>'
+                + '<span style="font-weight:600;min-width:150px;">' + p.name
+                + (p.grp ? '<span class="bt-grp-tag" title="偏离度再平衡时与该组其它指数合并判断">' + p.grp + '组</span>' : '')
+                + '</span>'
                 + '<label>权重 <input type="number" class="bt-w" min="0" max="100" step="1" value="' + p.w + '" placeholder="0" oninput="onBtInputChange(' + i + ', this.value, \'w\')"> %</label>'
                 + '<label>年跟踪误差 <input type="number" class="bt-err" min="0" max="10" step="0.1" value="' + p.err + '" placeholder="0" oninput="onBtInputChange(' + i + ', this.value, \'err\')"> %</label>'
                 + '<button class="btn" onclick="removeBtIndex(' + i + ')" title="移除该指数">✕ 移除</button>'
                 + '</div>'
             ).join('') || '<div style="color:#8b949e;font-size:13px;padding:8px 0;">尚未添加指数，请点击上方「➕ 添加指数」。</div>';
+            renderBtGroupRows();   // 增删指数后同步「分组判断」的候选
         }
 
         function onBtInputChange(i, val, field) {
@@ -1687,19 +1901,238 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
         // 参数（权重/跟踪误差/择时权重）改动后自动重算，避免「图还是旧口径」的误解。
         // 防抖 300ms：连续输入时只在停顿后跑一次。
         function scheduleBtRun() {
-            if (!btHasRun) return;
+            // 只要成功跑过一次，后续改参数（含切模式、填阈值）都自动重算；
+            // 否则像「切到偏离度→还没填阈值→结果被清空」之后，再填阈值也不会自己跑
+            if (!btHasRun && !btHasRunOnce) return;
             clearTimeout(btRunTimer);
-            btRunTimer = setTimeout(() => { if (btHasRun) runBacktest(); }, 300);
+            btRunTimer = setTimeout(() => { if (btHasRun || btHasRunOnce) runBacktest(); }, 300);
         }
 
+        // ===== 偏离度再平衡：口径切换 + 分组 =====
+        const BT_GROUP_KEYS = ['A', 'B', 'C', 'D', 'E', 'F'];
+
+        function setBtDevMode(mode, btn) {
+            btDevMode = (mode === 'rel') ? 'rel' : 'abs';
+            document.querySelectorAll('#bt-thresh-panel .btn[data-dev]').forEach(b =>
+                b.classList.toggle('active', b.dataset.dev === btDevMode));
+            updateThreshHint();
+            renderBtGroupSummary();
+            if (btHasRun || btHasRunOnce) runBacktest();
+        }
+
+        // 每只指数一个「组」下拉：同组即合并成一个整体判断偏离
+        function renderBtGroupRows() {
+            const el = document.getElementById('bt-group-rows');
+            if (!el) return;
+            el.innerHTML = btPicks.map((p, i) =>
+                '<span class="dev-group-item' + (p.grp ? ' grp-on' : '') + '">'
+                + p.name
+                + '<select onchange="setBtGroup(' + i + ', this.value)" title="把几只同类指数设为同一组，按合计权重判断偏离">'
+                + ['', ...BT_GROUP_KEYS].map(g =>
+                    '<option value="' + g + '"' + ((p.grp || '') === g ? ' selected' : '') + '>'
+                    + (g ? g + '组' : '不分组') + '</option>').join('')
+                + '</select></span>'
+            ).join('') || '<span style="color:#8b949e;font-size:12.5px;">尚未添加指数。</span>';
+            renderBtGroupSummary();
+        }
+
+        function setBtGroup(i, g) {
+            if (!btPicks[i]) return;
+            btPicks[i].grp = BT_GROUP_KEYS.includes(g) ? g : '';
+            renderBtGroupRows();
+            renderBtRowsBadges();
+            updateThreshHint();
+            scheduleBtRun();
+        }
+
+        // 只重画 ① 行的组标签，不重建输入框（否则正在填的权重会失焦）
+        function renderBtRowsBadges() {
+            document.querySelectorAll('#bt-index-rows .bt-row').forEach((row, i) => {
+                const p = btPicks[i];
+                if (!p) return;
+                const nameEl = row.firstElementChild;
+                let tag = nameEl.querySelector('.bt-grp-tag');
+                if (p.grp) {
+                    if (!tag) { tag = document.createElement('span'); tag.className = 'bt-grp-tag'; nameEl.appendChild(tag); }
+                    tag.textContent = p.grp + '组';
+                    tag.title = '偏离度再平衡时与该组其它指数合并判断';
+                } else if (tag) { tag.remove(); }
+            });
+        }
+
+        // 分组信息（目标权重按「权重大于 0 的指数」归一化后计算，与回测口径一致）
+        function btGroupInfo(picks) {
+            const map = new Map();
+            picks.forEach((p, i) => {
+                const g = p.grp || '';
+                if (!g) return;
+                if (!map.has(g)) map.set(g, { key: g, label: g + '组', names: [], idx: [] });
+                const o = map.get(g); o.names.push(p.name); o.idx.push(i);
+            });
+            const tot = picks.reduce((s, p) => s + (p.w || 0), 0);
+            const out = [];
+            [...map.keys()].sort().forEach(k => {
+                const o = map.get(k);
+                o.target = tot > 0 ? o.idx.reduce((s, i) => s + (picks[i].w || 0), 0) / tot * 100 : 0;
+                out.push(o);
+            });
+            return out;
+        }
+
+        // 判断单元：不分组 = 各自一个单元；同组 = 合成一个单元（顺序：先散只、后各组）
+        function btDevUnits(picks) {
+            const groups = {};
+            const units = [];
+            picks.forEach((p, i) => {
+                if (p.grp) { (groups[p.grp] = groups[p.grp] || []).push(i); }
+                else units.push({ label: p.name || ('指数' + (i + 1)), idx: [i] });
+            });
+            Object.keys(groups).sort().forEach(g => units.push({ label: g + '组', idx: groups[g] }));
+            return units;
+        }
+
+        // 当前阈值（未填返回 null）
+        function btThreshValue() {
+            const raw = parseFloat(document.getElementById('bt-thresh').value);
+            if (!Number.isFinite(raw) || raw <= 0) return null;
+            return Math.min(50, Math.max(1, raw));
+        }
+
+        // 触发点：绝对口径 = 目标 ± 阈值（百分点）；相对口径 = 目标 ×(1±阈值%)
+        function btTriggerWeight(target, pct, dir) {
+            if (!(pct > 0)) return null;
+            return btDevMode === 'rel' ? target * (1 + dir * pct / 100) : target + dir * pct;
+        }
+
+        function renderBtGroupSummary() {
+            const el = document.getElementById('bt-group-summary');
+            if (!el) return;
+            if (!btPicks.length) { el.innerHTML = ''; return; }
+            // 只用真正参与回测的（权重大于 0）指数，和计算口径保持一致
+            const active = btPicks.filter(p => (p.w || 0) > 0);
+            const idle = btPicks.filter(p => !((p.w || 0) > 0) && p.grp);
+            const pct = btThreshValue();
+            const info = btGroupInfo(active);
+            const groups = info.filter(g => g.idx.length > 1);
+            const single = info.filter(g => g.idx.length === 1);
+            const fmt = v => (Math.round(v * 10) / 10) + '%';
+            const parts = [];
+            groups.forEach(g => {
+                let s = '<b>' + g.label + '</b>：' + g.names.join(' + ') + ' ｜ 目标合计 ' + fmt(g.target);
+                if (g.target >= 99.9) {
+                    // 组内已占满全组合，权重不可能再漂移，给了触发点反而误导
+                    s += ' <span style="color:#6e7681;">（合计占满 100%，不会漂移）</span>';
+                } else if (pct != null) {
+                    const up = btTriggerWeight(g.target, pct, 1);
+                    const down = btTriggerWeight(g.target, pct, -1);
+                    s += ' → <span class="dev-trigger">合计涨到 ' + fmt(up) + '（或跌到 ' + fmt(Math.max(0, down)) + '）即调回</span>';
+                }
+                parts.push(s);
+            });
+            single.forEach(g => {
+                parts.push('<span style="color:#6e7681;">' + g.label + '（' + g.names[0] + '）只有 1 只，等同不分组</span>');
+            });
+            const idleNote = idle.length
+                ? '<br><span style="color:#6e7681;">' + idle.map(p => p.name).join('、') + ' 已分组但权重为 0，暂不参与判断</span>'
+                : '';
+            if (!groups.length) {
+                el.innerHTML = '当前<b>没有可合并判断的组</b>：每只指数各自判断偏离。把两只同类指数设为同一组（如 <b>A组</b>），就会按两者合计权重判断，组内不再单独触发。'
+                    + (parts.length ? '<br>' + parts.join('<br>') : '') + idleNote;
+                return;
+            }
+            const groupedCount = info.reduce((s, g) => s + g.idx.length, 0);
+            const rest = active.length - groupedCount;
+            const modeTxt = btDevMode === 'rel' ? '相对偏离（占目标权重的百分比）' : '绝对偏离（权重差的百分点）';
+            el.innerHTML = '按' + modeTxt + '判断，当前分组：<br>'
+                + parts.join('<br>')
+                + (rest > 0 ? '<br><span style="color:#6e7681;">其余 ' + rest + ' 只未分组，各自单独判断</span>' : '')
+                + idleNote;
+        }
+
+        // 阈值输入变化：示例与分组触发点一起更新
+        function onThreshInput() {
+            updateThreshHint();
+            renderBtGroupSummary();
+        }
+
+        // 偏离度示例随「口径 / 阈值 / 分组」联动，避免示例与实际参数对不上
+        function updateThreshHint() {
+            const el = document.getElementById('bt-thresh-hint');
+            if (!el) return;
+            const v = btThreshValue();
+            const rel = btDevMode === 'rel';
+            const unitEl = document.getElementById('bt-thresh-unit');
+            if (unitEl) unitEl.textContent = rel ? '%' : '百分点';
+            const r1 = x => Math.round(x * 10) / 10;
+            // 有「多只组成一组」时用该组举例（用户看的就是这个口径），否则用 5:5 组合
+            const picks = btPicks.filter(p => (p.w || 0) > 0);
+            const grp = btGroupInfo(picks).filter(g => g.idx.length > 1 && g.target < 99.9)[0];
+            if (grp) {
+                if (v == null) {
+                    el.textContent = '按「' + grp.label + '」的合计权重判断；填入阈值后给出具体触发点';
+                    return;
+                }
+                const up = r1(btTriggerWeight(grp.target, v, 1));
+                const down = r1(Math.max(0, btTriggerWeight(grp.target, v, -1)));
+                el.textContent = '例：' + grp.label + '目标合计 ' + r1(grp.target) + '%，设 ' + v + (rel ? '%（相对）' : ' 个百分点')
+                    + ' → 合计涨到 ' + up + '%（或跌到 ' + down + '%）时全部调回';
+                return;
+            }
+            if (v == null) {
+                el.textContent = rel
+                    ? '按相对目标的比例判断；例如填 10 时，5:5 组合某只涨到 55%（50%×110%）就调回'
+                    : '按权重与目标的绝对差判断；例如填 10 时，5:5 组合某只涨到 60% 就调回';
+                return;
+            }
+            const up = r1(btTriggerWeight(50, v, 1));
+            const down = r1(btTriggerWeight(50, v, -1));
+            el.textContent = rel
+                ? '例：5:5 组合设 ' + v + '%（相对）→ 某只涨到 ' + up + '%（=50%×' + (1 + v / 100).toFixed(2) + '）或跌到 ' + down + '% 时全部调回 5:5'
+                : '例：5:5 组合设 ' + v + ' 个百分点 → 某只涨到 ' + up + '%（或跌到 ' + down + '%）时全部调回 5:5';
+        }
+
+        // 一级分类：时间 / 偏离度 / 主观择时。选哪个就只展开哪组参数
+        function setBtMode(mode, btn) {
+            document.querySelectorAll('#bt-rebal-modes .rebal-mode').forEach(b => b.classList.remove('active'));
+            if (btn) btn.classList.add('active');
+            const timePanel = document.getElementById('bt-time-panel');
+            const threshPanel = document.getElementById('bt-thresh-panel');
+            const manualPanel = document.getElementById('bt-manual-panel');
+            if (timePanel) timePanel.style.display = (mode === 'time') ? 'flex' : 'none';
+            if (threshPanel) threshPanel.style.display = (mode === 'threshold') ? 'flex' : 'none';
+            if (manualPanel) manualPanel.style.display = (mode === 'manual') ? 'block' : 'none';
+            let skipAuto = false;
+            if (mode === 'time') {
+                // 回到时间模式时沿用上次选的频率，而不是重置成半年
+                btFreq = btLastTimeFreq;
+                document.querySelectorAll('#bt-time-panel .btn[data-freq]').forEach(b =>
+                    b.classList.toggle('active', b.dataset.freq === btFreq));
+            } else if (mode === 'threshold') {
+                btFreq = 'threshold';
+                renderBtGroupRows();   // 进这个模式才需要编组，先按当前指数渲染一遍
+                updateThreshHint();
+                // 阈值还没填：先把旧口径的结果收起来，光标落到输入框，不弹红字催
+                const el = document.getElementById('bt-thresh');
+                if (!(parseFloat(el.value) > 0) && (btHasRun || btHasRunOnce)) {
+                    resetBtOutput('');
+                    el.focus();
+                    skipAuto = true;
+                }
+            } else {
+                btFreq = 'manual';
+                renderBtManualList();
+            }
+            if (!skipAuto && (btHasRun || btHasRunOnce)) runBacktest();
+        }
+
+        // 二级：时间再平衡的频率
         function setBtFreq(freq, btn) {
             btFreq = freq;
-            const grp = document.getElementById('bt-rebalance');
+            btLastTimeFreq = freq;
+            const grp = document.getElementById('bt-time-panel');
             grp.querySelectorAll('.btn[data-freq]').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
-            const panel = document.getElementById('bt-manual-panel');
-            if (panel) panel.style.display = (freq === 'manual') ? 'block' : 'none';
-            if (btHasRun) runBacktest();
+            if (btHasRun || btHasRunOnce) runBacktest();
         }
 
         // ===== 手动择时再平衡时点管理 =====
@@ -1767,7 +2200,7 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
         }
 
         function getBtConfig() {
-            const picks = btPicks.filter(p => p.w > 0).map(p => ({ name: p.name, w: p.w, err: p.err }));
+            const picks = btPicks.filter(p => p.w > 0).map(p => ({ name: p.name, w: p.w, err: p.err, grp: p.grp || '' }));
             const total = picks.reduce((s, p) => s + p.w, 0);
             return { picks, total };
         }
@@ -1808,11 +2241,14 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
         // 净值序列：按投入计划注入资金，建仓/定投/再平衡日调整到目标权重，扣除换手成本
         // rebalK: 定期再平衡间隔（月，0=不定期调仓）；manualMap: 手动择时 Map（'YYYY-MM' -> 自定义权重数组|null，
         // 优先生效）；该月设置了自定义权重时，该月内的所有调仓（含建仓/定投日）都用该权重
-        function btComputeNav(dates, assets, fundNav, inflow, rebalK, costBp, manualMap) {
+        // threshCfg: 偏离度配置 {pct, mode:'abs'|'rel', units:[{label, idx:[...]}]}——任一判断单元
+        //   （单只指数，或一个组的合计权重）偏离达到 pct 即全部调回目标；null/缺省=不启用
+        // out: 可选累加器 {count, dates, byUnit}，记录该模式实际触发的次数、时点与是哪个单元触发的
+        function btComputeNav(dates, assets, fundNav, inflow, rebalK, costBp, manualMap, threshCfg, out) {
             const n = dates.length, k = assets.length;
             const baseW = assets.map(a => a.w / 100);   // 初始权重（也作为留空分量的回退值）
             const w = baseW.slice();
-            const units = assets.map(() => 0);
+            const shares = assets.map(() => 0);
             let cash = 0, invested = 0;
             const nav = new Array(n);
             const startMonthKey = (+dates[0].slice(0, 4)) * 12 + (+dates[0].slice(5, 7));
@@ -1831,6 +2267,31 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
                         // 手动择时：该月首个交易日调仓
                         const key = dates[t].slice(0, 7);
                         if (manualMap.has(key) && dates[t - 1].slice(0, 7) !== key) reb = true;
+                    } else if (threshCfg && threshCfg.pct > 0) {
+                        // 偏离度再平衡：不看日期，只看漂移。按「判断单元」算偏离（分组时用组的合计权重），
+                        // 任一单元越线就整体调回目标（有多个越线也一次调完，避免连续触发）。
+                        let M = cash;
+                        for (let i = 0; i < k; i++) M += shares[i] * fundNav[i][t];
+                        if (M > 0) {
+                            let maxDev = 0, hit = null;
+                            for (const u of threshCfg.units) {
+                                let act = 0, tgt = 0;
+                                for (const i of u.idx) { act += shares[i] * fundNav[i][t] / M; tgt += curW[i]; }
+                                // 绝对口径 = 差几个百分点；相对口径 = 差目标权重的百分之几
+                                const dev = (threshCfg.mode === 'rel')
+                                    ? (tgt > 0 ? Math.abs(act - tgt) / tgt * 100 : 0)
+                                    : Math.abs(act - tgt) * 100;
+                                if (dev > maxDev) { maxDev = dev; hit = u; }
+                            }
+                            // 定投日本来就要买入并顺带校准，不重复计一次「偏离触发」
+                            if (maxDev >= threshCfg.pct && !reb) {
+                                reb = true;
+                                if (out) {
+                                    out.count++; (out.dates = out.dates || []).push(dates[t]);
+                                    if (hit) { out.byUnit = out.byUnit || {}; out.byUnit[hit.label] = (out.byUnit[hit.label] || 0) + 1; }
+                                }
+                            }
+                        }
                     } else if (rebalK > 0) {
                         const mk = (+dates[t].slice(0, 4)) * 12 + (+dates[t].slice(5, 7));
                         if (mk > lastRebKey && (mk - startMonthKey) % rebalK === 0) { reb = true; lastRebKey = mk; }
@@ -1838,20 +2299,20 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
                 }
                 if (reb) {
                     let M = cash;
-                    for (let i = 0; i < k; i++) M += units[i] * fundNav[i][t];
+                    for (let i = 0; i < k; i++) M += shares[i] * fundNav[i][t];
                     // 换手成本 = 单边买入金额 × 成本率
                     let buyAmt = 0;
                     for (let i = 0; i < k; i++) {
-                        const old = units[i] * fundNav[i][t], target0 = M * curW[i];
+                        const old = shares[i] * fundNav[i][t], target0 = M * curW[i];
                         if (target0 > old) buyAmt += target0 - old;
                     }
                     const cost = buyAmt * costBp / 10000;
                     const Mnet = M - cost;
-                    for (let i = 0; i < k; i++) units[i] = Mnet * curW[i] / fundNav[i][t];
+                    for (let i = 0; i < k; i++) shares[i] = Mnet * curW[i] / fundNav[i][t];
                     cash = 0;
                 }
                 let v = cash;
-                for (let i = 0; i < k; i++) v += units[i] * fundNav[i][t];
+                for (let i = 0; i < k; i++) v += shares[i] * fundNav[i][t];
                 nav[t] = invested > 0 ? v / invested : v;
             }
             return nav;
@@ -1975,14 +2436,29 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
                 }
             }
             const n = dates.length;
-            const rebalK = BT_FREQ_MONTHS[btFreq] || 6;
+            // 偏离度配置：只有「偏离度」模式读这些（阈值 + 口径 + 分组）。
+            // 输入框默认留空，没填就提示用户填，不替他默认一个数字（否则回测口径会不明不白）。
+            let threshCfg = null;
+            if (btFreq === 'threshold') {
+                const pctIn = btThreshValue();
+                if (pctIn == null) {
+                    resetBtOutput(btDevMode === 'rel'
+                        ? '偏离度模式：请先填写相对偏离阈值（1~50，占目标权重的百分比，例如 10）。'
+                        : '偏离度模式：请先填写绝对偏离阈值（1~50 的百分点数，例如 10）。');
+                    return;
+                }
+                threshCfg = { pct: pctIn, mode: btDevMode, units: btDevUnits(picks) };
+            }
+            // 定期间隔只对 月/季/半年/年 生效；偏离度与手动择时都不按月触发
+            const rebalK = BT_FREQ_MONTHS[btFreq] || 0;
             const manualMap = (btFreq === 'manual')
                 ? new Map(btManualRebalDates.map(p => [p.ym, p.w])) : null;
+            const rebalOut = { count: 0, dates: [] };
 
             // 组合基金净值（含跟踪误差）与基准资产
             const fundNav = btBuildFundNav(maps, dates, picks.map(p => p.err));
             const inflow = btBuildInflows(dates, btInvestMode);
-            const nav = btComputeNav(dates, picks, fundNav, inflow, rebalK, costBp, manualMap);
+            const nav = btComputeNav(dates, picks, fundNav, inflow, rebalK, costBp, manualMap, threshCfg, rebalOut);
             const dd = btDrawdown(nav);
 
             // 比较基准：等权（各指数等权、无误差、买入持有）或单指数
@@ -2009,6 +2485,7 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
             showBtResults();
 
             btHasRun = true;
+            btHasRunOnce = true;
             btReturnsData = { dates, nav, benchNav, benchName, maps, picks };
 
             // 基础统计：定投模式下年化改用资金加权口径（XIRR），否则几何年化严重低估
@@ -2016,18 +2493,37 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
             if (btInvestMode === 'dca') annualOverride = btXIRR(dates, nav, inflow);
             const s = btStats(dates, nav, rfPct, annualOverride);
             const annualLabel = (btInvestMode === 'dca' && annualOverride != null) ? '年化(资金加权)' : '年化';
+            // 阈值模式统计行：口径（绝对 pp / 相对 %）+ 阈值 + 触发次数；分组时另给「谁触发的」
+            let devFreqName = '', devUnitNote = '';
+            if (btFreq === 'threshold') {
+                const byUnit = rebalOut.byUnit || {};
+                const unitKeys = Object.keys(byUnit);
+                const unitTitle = unitKeys.map(k => k + ' ' + byUnit[k] + ' 次').join('、');
+                devFreqName = '<span title="' + (unitTitle ? '触发来源：' + unitTitle : '区间内没有单元越线') + '">'
+                    + (btDevMode === 'rel' ? '相对偏离 ' : '绝对偏离 ')
+                    + threshCfg.pct + (btDevMode === 'rel' ? '%' : ' 个百分点')
+                    + ' 再平衡 ×' + rebalOut.count + ' 次</span>';
+                if (unitKeys.length) devUnitNote = '｜<span style="color:#8b949e;">触发来源 ' + unitTitle + '</span>';
+            }
             const freqName = (btFreq === 'manual')
                 ? '手动择时×' + btManualRebalDates.length
-                : { monthly: '月平衡', quarterly: '季平衡', semiannual: '半年平衡', annual: '年平衡' }[btFreq];
+                : (btFreq === 'threshold'
+                    ? devFreqName
+                    : { monthly: '月平衡', quarterly: '季平衡', semiannual: '半年平衡', annual: '年平衡' }[btFreq]);
             const manualWarn = (btFreq === 'manual' && !btManualRebalDates.length)
                 ? '｜<span style="color:#d29922;">未添加再平衡时点（仅期初建仓）</span>' : '';
+            // 阈值模式一次都没触发，等价于买入持有——不说清楚会被当成策略无效
+            const threshWarn = (btFreq === 'threshold' && rebalOut.count === 0)
+                ? (btDevUnits(picks).length < 2
+                    ? '｜<span style="color:#d29922;">只有 1 个判断单元，权重不会漂移（0 次触发）</span>'
+                    : '｜<span style="color:#d29922;">权重未越线，区间内 0 次触发（可调小阈值）</span>') : '';
             const investName = btInvestMode === 'lump' ? '一次性投入' : '每月定投';
             const color = s.totalRet >= 0 ? '#f85149' : '#3fb950';
             const normNote = normalized ? '｜<span style="color:#d29922;">权重已归一化至 100%</span>' : '';
             const costNote = costBp > 0 ? '｜<span style="color:#d29922;">调仓成本 ' + costBp + 'bp</span>' : '';
             // 定投是分批进场，净值＝市值÷累计投入，回撤是「收益回撤」而非资金最大回撤，容易误读
             const dcaNote = (btInvestMode === 'dca') ? '｜<span style="color:#8b949e;">回撤按「市值÷累计投入」净值口径</span>' : '';
-            statsEl.innerHTML = '区间 ' + dates[0] + ' ~ ' + dates[n - 1] + '｜' + investName + '｜' + freqName + manualWarn + normNote + costNote + benchAlignNote + dcaNote
+            statsEl.innerHTML = '区间 ' + dates[0] + ' ~ ' + dates[n - 1] + '｜' + investName + '｜' + freqName + manualWarn + threshWarn + normNote + costNote + devUnitNote + benchAlignNote + dcaNote
                 + '<br>总收益 <b style="color:' + color + '">' + (s.totalRet >= 0 ? '+' : '') + (s.totalRet * 100).toFixed(2) + '%</b>｜'
                 + annualLabel + ' <b style="color:' + color + '">' + (s.annual >= 0 ? '+' : '') + (s.annual * 100).toFixed(2) + '%</b>｜'
                 + '最大回撤 <b style="color:#3fb950">' + (s.maxDD * 100).toFixed(2) + '%</b>｜'
@@ -2343,12 +2839,13 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
         // ===== 回测页子模块切换：组合回测 / 指数对比 =====
         let currentBtTab = 'portfolio';
         const BT_TAB_DESC = {
-            portfolio: '选择指数并分配权重（合计 100%）、设置各指数的年跟踪误差，再选定回测区间与再平衡频率，查看组合收益曲线与历史回撤。',
+            portfolio: '选择指数并分配权重（合计 100%）、设置各指数的年跟踪误差，再选定回测区间与再平衡方式（按时间定期、按权重偏离度、或手动择时），查看组合收益曲线与历史回撤。',
             compare: '添加任意多个指数（可为每个指数设置年跟踪误差），在完全相同的区间与交易日集合上横向比较收益、回撤、波动与相关性，看清谁的性价比更高。'
         };
 
         function switchBtTab(tab, btn) {
             currentBtTab = tab;
+            closeIdxPicker();       // 切模块时收起「添加指数」下拉，免得残留在另一个模块里
             document.querySelectorAll('#page-backtest .bt-tab').forEach(v => { v.style.display = 'none'; });
             const el = document.getElementById('bt-tab-' + tab);
             if (el) el.style.display = 'block';
@@ -2378,7 +2875,6 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
         const CMP_COLORS = ['#58a6ff', '#f0883e', '#3fb950', '#f85149',
                             '#a371f7', '#e3b341', '#39c5cf', '#ec8cb5'];
         let cmpPicks = [];              // 已添加的指数 [{name, err}]，默认空：没选指数就不出图
-        let cmpPickerOpen = false;
         let cmpInit = false;
         let cmpHasRun = false;
         let cmpReturnsMode = 'year';    // year / month
@@ -2435,28 +2931,10 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
             resetCmpOutput();
         }
 
-        // ===== 选择区：与「组合回测」同一套 加号添加 + 行内设置 =====
-        function toggleCmpPicker() {
-            cmpPickerOpen = !cmpPickerOpen;
-            const el = document.getElementById('cmp-picker');
-            if (!el) return;
-            if (cmpPickerOpen) {
-                const remain = indexNames.filter(n => !cmpPicks.some(p => p.name === n));
-                el.innerHTML = remain.length
-                    ? remain.map(n => '<button class="btn" style="margin:3px;" onclick="addCmpIndex(\'' + n + '\')">' + n + '</button>').join('')
-                    : '<span style="color:#8b949e;">所有指数均已加入对比。</span>';
-                el.style.display = 'flex';
-            } else {
-                el.style.display = 'none';
-            }
-        }
-
+        // ===== 选择区：与「组合回测」同一套 加号下拉 + 行内设置 =====
         function addCmpIndex(name) {
             if (cmpPicks.some(p => p.name === name)) return;
             cmpPicks.push({ name: name, err: '' });   // 跟踪误差默认留空，待用户直接输入
-            cmpPickerOpen = false;
-            const el = document.getElementById('cmp-picker');
-            if (el) el.style.display = 'none';
             renderCmpRows();
             // 加/减指数会让「第几个」变化，颜色跟着位置重排：已出图时同步重算，避免颜色与列表对不上
             if (cmpHasRun) runCompare();
