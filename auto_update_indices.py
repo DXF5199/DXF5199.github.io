@@ -39,8 +39,6 @@ INDEX_CONFIG = [
     # 免费接口（与其他中证指数同一套更新方式），不消耗 Wind 积分。
     {"code": "H21052", "name": "国信价值全收益", "source": "CSI"},
     {"code": "480081", "name": "价值100全收益", "source": "CNI"},
-    {"code": "480080", "name": "成长100全收益", "source": "CNI"},
-    {"code": "H21187", "name": "中证科技100全收益", "source": "CSI"},
     # 中证2000（全收益口径 932000CNY010）：点位、成分股权重、行业分布、PE/PB/股息率
     # 全部走中证指数官网的免费接口，不消耗 Wind 积分（free_only）。
     # 仅「近10年 PE/PB 历史序列」（用于估值分位）中证官网不提供，首次嵌入时用
@@ -84,8 +82,6 @@ VALUATION_CONFIG = {
     "A500红利低波全收益": ("932422", "CSI"),
     "国信价值全收益": ("931052", "CSI"),
     "价值100全收益": ("480081", "CNI"),
-    "成长100全收益": ("480080", "CNI"),
-    "中证科技100全收益": ("931187", "CSI"),
     "中证2000全收益": ("932000", "CSI"),
     # 标普官方不公开指数权重文件（需 SPICE 账号）：成份股/权重/总市值/申万行业
     # 一律走 Wind（见 WIND_COMPONENT_INDICES），按 ISO 周缓存、每周只刷一次省积分；
@@ -148,8 +144,7 @@ INDUSTRY_LEVEL_NAME = {1: "一", 2: "二", 3: "三", 4: "四"}
 
 # 申万行业分布（红色火箭）：成分股接口一次返回全部成分股的
 # 权重 + 申万一/二/三/四级行业名，按权重聚合成行业分布。
-# 注意国证指数用 98 前缀（价值100 = 980081、成长100 = 980080），
-# 与国证官网的 48 前缀不同。
+# 注意国证指数用 98 前缀（价值100 = 980081），与国证官网的 48 前缀不同。
 REDROCKET_COMPONENT_URL = (
     "https://www.hongsehuojian.com/fundex-quote/security/component/"
     "componentStock?securityCode={code}&isAll=1"
@@ -162,7 +157,6 @@ REDROCKET_CODES = {
     "A500红利低波全收益": "932422.CSI",
     "国信价值全收益": "931052.CSI",
     "价值100全收益": "980081.CNI",
-    "成长100全收益": "980080.CNI",
 }
 REDROCKET_HEADERS = {
     "User-Agent": TENCENT_HEADERS["User-Agent"],
@@ -217,8 +211,8 @@ WIND_API_KEY = os.environ.get("WIND_API_KEY", "").strip()
 # 标普中国A股大盘红利低波50 全收益指数（Wind 代码）：官方日频，替代 515450 净值推算
 SP_WINDCODE = "SPCLLHCT.SPI"
 # 各指数的 Wind 官方代码：日频点位、加权估值走这条通道（ETF 行情不在此列，用新浪免费接口）。
-# 价值100 / 成长100 的 Wind 代码带 R 后缀（全收益），即 480081.CNI / 480080.CNI；
-# 98 开头（980081/980080）是同名的价格指数，口径不同，不可混用。
+# 价值100 的 Wind 代码带 R 后缀（全收益），即 480081.CNI；
+# 98 开头（980081）是同名的价格指数，口径不同，不可混用。
 WIND_CODES = {
     "中证红利全收益": "H00922.CSI",
     "智选高股息全收益": "932305CNY010.CSI",
@@ -227,8 +221,6 @@ WIND_CODES = {
     "A500红利低波全收益": "932422CNY010.CSI",
     "国信价值全收益": "H21052.CSI",
     "价值100全收益": "480081.CNI",
-    "成长100全收益": "480080.CNI",
-    "中证科技100全收益": "H21187.CSI",
     # 中证2000：日常「官方加权 PB」与「首次补齐历史 PE/PB 序列」都用这个代码。
     # 这里必须用价格指数 932000.CSI，不能用全收益 932000CNY010.CSI ——
     # Wind 对全收益代码只给 PB、PE 返回空，补历史时会丢一半数据。
@@ -249,12 +241,12 @@ DY_TOTAL_WEIGHT = {"中证2000全收益"}
 # ===== 估值水位表的指标口径（同时决定要花多少 Wind 积分）=====
 # 页面列：PB｜PB 10年分位｜加权股息率｜成分股｜更新日期。各指数「只算、只存」自己
 # 需要的那几列，不需要的指标不取数、不写进 HTML（页面单元格显示「—」占位）：
-#   PB_ONLY_INDICES  成长/科技/中证2000 —— 只算 PB（PE 仅内部用来续算分位历史）
+#   PB_ONLY_INDICES  中证2000 —— 只算 PB（PE 仅内部用来续算分位历史）
 #   DY_ONLY_INDICES  红利/高股息类 + 价值100 / 国信价值 —— 只算加权股息率，PE/PB 彻底移除
 #   纳斯达克100指数   —— 不展示任何估值，且不在 VALUATION_CONFIG 中，不产生请求
 #   万得微盘股指数    —— 不在 VALUATION_CONFIG，其 PB 由 _apply_micro_daily 单独处理
 PB_ONLY_INDICES = {
-    "成长100全收益", "中证科技100全收益", "中证2000全收益",
+    "中证2000全收益",
 }
 DY_ONLY_INDICES = {
     "中证红利全收益", "智选高股息全收益", "红利低波全收益",
@@ -262,12 +254,11 @@ DY_ONLY_INDICES = {
     "价值100全收益", "国信价值全收益",
 }
 # 仍需向 Wind 取「官方加权 PB」的指数（其余指数不再调用 Wind 估值接口）：
-#   成长100R / 中证科技100 —— 整块估值都取 Wind 官方加权；
 #   中证2000 —— 点位与成份股仍走中证官网免费接口，只有 PB 直接用 Wind 官方值，
 #               不再按成份股自算（见 FREE_ONLY_PB_OVERRIDE）。
 #   万得微盘股指数 —— 不在本循环，其 PB 由 _apply_micro_daily 单独取 Wind。
 WIND_PB_INDICES = {
-    "成长100全收益", "中证科技100全收益", "中证2000全收益",
+    "中证2000全收益",
 }
 # 「免费源算 PE/股息率 + Wind 覆盖 PB」的指数：中证2000 属于此类
 FREE_ONLY_PB_OVERRIDE = {n for n in WIND_PB_INDICES if n in FREE_ONLY_INDICES}
@@ -568,7 +559,7 @@ def wind_index_valuation_full(name, trade_date=None):
     """取指数官方加权 PE / PB / 股息率，返回 {"pe","pb","dy","date"}。
 
     Wind 的 get_index_fundamentals 按成份股加权聚合返回一行指数数据；当指数
-    层面缺某项指标时（例如成长100 没有股息率），结果会下钻成个股明细，因此
+    层面缺某项指标时（例如中证2000 没有股息率），结果会下钻成个股明细，因此
     解析时只认「首列等于目标 Wind 代码」的那一行，避免把个股值当成指数值。
     """
     code = WIND_CODES.get(name)
@@ -605,8 +596,8 @@ def wind_index_valuation_full(name, trade_date=None):
 
 
 def wind_index_pepb_series(windcode, begin_date, end_date, page_rows=100,
-                           max_calls=30, freq="每个交易日"):
-    """取指数 PE / PB 序列，返回 ({date: pe}, {date: pb})。
+                           max_calls=30, freq="每个交易日", want_dy=False):
+    """取指数 PE / PB（可选股息率）序列，返回 ({date: pe}, {date: pb}, {date: dy})。
 
     与 wind_index_pb_series 同源，但一次问答同时取 PE 与 PB；接口单次最多返回
     100 行，因此按日期窗口滚动翻页。仅用于「第一次把某个指数纳入工具时」补齐
@@ -616,11 +607,12 @@ def wind_index_pepb_series(windcode, begin_date, end_date, page_rows=100,
     Wind 返回的是含亏损股负盈利的整体法（中证2000 会到 127 倍），与官网口径
     （约 37 倍）差 3 倍多，也会让估值分位完全失真。
     """
-    pe_map, pb_map = {}, {}
+    pe_map, pb_map, dy_map = {}, {}, {}
     cursor = begin_date
     for _ in range(max_calls):
+        fields = "市盈率PE_TTM_剔除亏损股、市净率PB" + ("、股息率" if want_dy else "")
         question = (f"请逐行列出指数({windcode})在{cursor}至{end_date}期间{freq}的"
-                    f"市盈率PE_TTM_剔除亏损股、市净率PB，按日期升序，不要汇总")
+                    f"{fields}，按日期升序，不要汇总")
         doc_text = _wind_call("get_index_fundamentals", {"question": question},
                               timeout=180)
         try:
@@ -635,7 +627,7 @@ def wind_index_pepb_series(windcode, begin_date, end_date, page_rows=100,
         for blk in blocks:
             names = [c.get("name", "") for c in blk.get("columns") or []]
             for row in blk.get("rows") or []:
-                d, pe, pb = None, None, None
+                d, pe, pb, dy = None, None, None, None
                 for name, val in zip(names, row):
                     if name == "日期" and val:
                         d = _norm_wind_date(val)
@@ -643,6 +635,8 @@ def wind_index_pepb_series(windcode, begin_date, end_date, page_rows=100,
                         pe = float(val)
                     elif "市净率" in name and isinstance(val, (int, float)):
                         pb = float(val)
+                    elif "股息率" in name and isinstance(val, (int, float)):
+                        dy = float(val)
                 if not d:
                     continue
                 got += 1
@@ -651,14 +645,17 @@ def wind_index_pepb_series(windcode, begin_date, end_date, page_rows=100,
                     pe_map[d] = round(pe, 4)
                 if pb and pb > 0:
                     pb_map[d] = round(pb, 4)
+                if dy and dy > 0:
+                    dy_map[d] = round(dy, 4)
         if got < page_rows or not newest or newest >= end_date:
             break
         # 下一页从"最新一天"继续（含当天，接口按自然日截断即可，重复点会被覆盖）
         cursor = newest
-    return pe_map, pb_map
+    return pe_map, pb_map, dy_map
 
 
-def seed_pepb_history_from_wind(name, begin_date="2015-01-01"):
+def seed_pepb_history_from_wind(name, begin_date="2015-01-01",
+                                want_dy=False, freq="每个交易日", min_points=100):
     """一次性用 Wind 补齐某指数的历史 PE/PB 序列（仅首次纳入工具时调用）。
 
     中证官网只提供最近 20 个交易日的市盈率/股息率文件，没有长历史 PE/PB，
@@ -678,20 +675,87 @@ def seed_pepb_history_from_wind(name, begin_date="2015-01-01"):
         # pb_daily（日频）逐日对齐，周频样本会让比值曲线前段稀疏、分位失真。
         # 代价是一次性约 8 次调用（3 年多约 780 个交易日，接口每页 100 行），
         # 之后每天由中证官网数据追加，不再调用 Wind。
-        pe_map, pb_map = wind_index_pepb_series(code, begin_date, end,
-                                                freq="每个交易日")
+        pe_map, pb_map, dy_map = wind_index_pepb_series(
+            code, begin_date, end, freq=freq, want_dy=want_dy)
     except Exception as e:
         print(f"⚠️ {name}：Wind 历史 PE/PB 补齐失败（{str(e)[:70]}），估值分位暂时留空，下次运行会重试")
         return None
-    dates = sorted(set(pe_map) & set(pb_map))
-    if len(dates) < 100:
-        print(f"⚠️ {name}：Wind 只返回 {len(dates)} 个交易日的历史 PE/PB，估值分位暂不计算")
+    keys = set(pe_map) | set(pb_map)
+    if want_dy:
+        keys |= set(dy_map)
+    dates = sorted(keys)
+    if len(dates) < min_points:
+        print(f"⚠️ {name}：Wind 只返回 {len(dates)} 个历史点，暂不写入")
         return None
-    print(f"{name}：Wind 一次性补齐 {len(dates)} 个日频历史点（PE/PB）"
-          f"（{dates[0]} ~ {dates[-1]}），此后按中证官网免费数据每日追加，不再调用 Wind")
+    print(f"{name}：Wind 一次性补齐 {len(dates)} 个历史点"
+          f"（{dates[0]} ~ {dates[-1]}）" + ("，含股息率" if want_dy else "")
+          + "，此后按免费数据每日追加，不再调用 Wind")
     return {"dates": dates,
-            "pe": [pe_map[d] for d in dates],
-            "pb": [pb_map[d] for d in dates]}
+            "pe": [pe_map.get(d) for d in dates],
+            "pb": [pb_map.get(d) for d in dates],
+            "dy": [dy_map.get(d) for d in dates] if want_dy else [None] * len(dates)}
+
+
+def dy_coverage(series):
+    """股息率通道的覆盖率：非空 dy 占日期序列的比例（0~1）。
+
+    只判断「有没有一个非空值」是不够的——之前补种失败、却已按日追加过一两天时，
+    序列里会有一两个孤零零的 dy、其余全空，用它画分位会得到一条几乎空白的图。
+    """
+    dates = (series or {}).get("dates") or []
+    if not dates:
+        return 0.0
+    dy = (series or {}).get("dy") or []
+    if len(dy) != len(dates):
+        return 0.0
+    return sum(1 for v in dy if v is not None) / len(dates)
+
+
+def backfill_dy_history(name, series, freq="每月最后一个交易日",
+                        min_points=40, force=False, min_coverage=0.60):
+    """用 Wind 补齐某指数历史股息率（杠铃「股息率 − 国债」利差图用）。
+
+    为什么不再用「当前股息率 × 最新 PE ÷ 历史 PE」反推：那个估算假设派息率恒定，
+    价值100 这类 PE 大幅下移的指数会被系统性低估，分位跟着失真。Wind 的指数股息率
+    本身就有长历史，直接取真值即可。
+
+    只填缺口，不覆盖已有值：已经按日追加的真实股息率优先保留；月/周频点之间用
+    **前值填充**（阶跃），不做插值——插值会造出并不存在的中间态。
+
+    返回 (是否改动, 说明文字)。
+    """
+    dates = (series or {}).get("dates") or []
+    if not dates:
+        return False, "没有日期序列"
+    dy = list((series or {}).get("dy") or [])
+    if len(dy) != len(dates):
+        dy = [None] * len(dates)
+    cov = dy_coverage({"dates": dates, "dy": dy})
+    if not force and cov >= min_coverage:
+        return False, f"股息率已覆盖 {cov * 100:.0f}%，跳过"
+
+    seed = seed_pepb_history_from_wind(name, dates[0], want_dy=True,
+                                       freq=freq, min_points=min_points)
+    if not seed:
+        return False, "Wind 未返回历史（下次运行重试）"
+    wind_dy = {d: v for d, v in zip(seed["dates"], seed["dy"]) if v is not None}
+    if not wind_dy:
+        return False, "Wind 未返回股息率字段（下次运行重试）"
+
+    order = sorted(wind_dy)
+    fill, ptr, filled = None, 0, 0
+    for i, d in enumerate(dates):
+        while ptr < len(order) and order[ptr] <= d:
+            fill = wind_dy[order[ptr]]
+            ptr += 1
+        if dy[i] is None and fill is not None:
+            dy[i] = fill
+            filled += 1
+    if not filled:
+        return False, "没有可填的缺口"
+    series["dy"] = dy
+    return True, (f"补 {filled} 个点（Wind {len(order)} 个{freq}样本 "
+                  f"{order[0]} ~ {order[-1]}），覆盖率 {dy_coverage(series) * 100:.0f}%")
 
 
 def wind_index_valuation(windcode="868008.WI", trade_date=None):
@@ -779,6 +843,98 @@ def fetch_risk_free_rate():
             time.sleep(1.5)
     print(f"中债10年期国债收益率抓取失败: {last_error}")
     return None, ""
+
+
+# 中国 10 年期国债到期收益率：东方财富公开报表接口（RPTA_WEB_TREASURYYIELD）。
+# 中债官网的 inityc 只返回「最新一条」曲线，回溯历史要逐日回刷；东财这个接口可以
+# 分页取回 2015 年以来的每日 10 年期到期收益率，正好喂「杠铃估值」里的
+# 股息率−国债利差，且完全免费、不消耗 Wind 积分。
+BOND_YIELD_REPORT = "RPTA_WEB_TREASURYYIELD"
+BOND_YIELD_FIELD = "EMM00166466"      # 中国国债收益率 10 年（%）
+BOND_YIELD_TOKEN = "894050c76af8597a853f5b408b759f5d"
+
+
+def fetch_bond_yield_history(existing=None, begin_date="2015-01-01"):
+    """抓 10 年期国债到期收益率的日频历史，返回 {"dates": [...], "values": [...]}（升序）。
+
+    与已有序列按日期合并（本接口的值覆盖旧值，保证修正过的数据能更新）。
+    任何一步失败都原样返回 existing，绝不把已有历史清空。
+    """
+    merged = {}
+    if existing and existing.get("dates") and existing.get("values"):
+        for d, v in zip(existing["dates"], existing["values"]):
+            if v is not None:
+                merged[d] = v
+    base = "https://datacenter-web.eastmoney.com/api/data/get"
+    headers = {
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
+        "Referer": "https://data.eastmoney.com/",
+    }
+    # 已有历史时只回抓最近 20 天：既补节假日/延迟披露，又不必每天把 7 页全拉一遍
+    query_from = begin_date
+    if merged:
+        try:
+            dt = datetime.strptime(max(merged), "%Y-%m-%d") - timedelta(days=20)
+            query_from = dt.strftime("%Y-%m-%d")
+        except ValueError:
+            query_from = begin_date
+
+    fetched = 0
+    page, pages = 1, 1
+    while page <= pages and page <= 20:
+        params = {
+            "type": BOND_YIELD_REPORT, "sty": "ALL", "st": "SOLAR_DATE", "sr": "-1",
+            "token": BOND_YIELD_TOKEN, "p": str(page), "ps": "500",
+            "filter": f"(SOLAR_DATE>='{query_from}')",
+        }
+        try:
+            resp = requests.get(base, params=params, headers=headers, timeout=30)
+            if resp.status_code != 200:
+                print(f"⚠️ 国债收益率历史第 {page} 页返回 HTTP {resp.status_code}，本轮停止翻页")
+                break
+            payload = resp.json()
+        except (requests.RequestException, ValueError) as e:
+            print(f"⚠️ 国债收益率历史抓取失败：{str(e)[:70]}")
+            break
+        result = payload.get("result") or {}
+        pages = int(result.get("pages") or 1)
+        rows = result.get("data") or []
+        if not rows:
+            break
+        for row in rows:
+            d = str(row.get("SOLAR_DATE") or "")[:10]
+            v = row.get(BOND_YIELD_FIELD)
+            if d and isinstance(v, (int, float)) and v > 0:
+                merged[d] = round(float(v), 4)
+                fetched += 1
+        page += 1
+
+    if fetched == 0:
+        print("⚠️ 国债收益率历史：本次没有取到任何有效数据，沿用原有序列")
+        return existing
+    dates = sorted(merged)
+    print(f"国债收益率历史：{len(dates)} 个交易日（{dates[0]} ~ {dates[-1]}），"
+          f"最新 {merged[dates[-1]]}%")
+    return {"dates": dates, "values": [merged[d] for d in dates]}
+
+
+def load_bond_history(content):
+    """从 HTML 中解析内嵌的 bondYieldHistory 数据块。"""
+    m = re.search(r'const bondYieldHistory = (\{.*?\});', content, re.DOTALL)
+    if not m:
+        return None
+    try:
+        return json.loads(m.group(1))
+    except ValueError:
+        print("⚠️ bondYieldHistory 数据块解析失败，本轮按空序列处理")
+        return None
+
+
+def dump_bond_history(history):
+    """把 bondYieldHistory 序列写回 JS 字面量。"""
+    body = json.dumps(history, ensure_ascii=False, separators=(",", ":"))
+    return f"const bondYieldHistory = {body};"
 
 
 def fetch_etf_from_eastmoney(code, market):
@@ -1245,78 +1401,6 @@ def fetch_us_history(code, last_saved_date=None):
     except Exception as e:
         print(f"抓取美股指数 {code} 历史行情失败: {e}")
     return {}
-
-# A500 风格对比（价值&成长仪表盘「大盘风格」视图）：A500价值全收益 / A500成长全收益。
-# 两者均走中证官网全收益代码（CNY010 后缀 = 全收益；CNY020 = 净收益，勿混用）：
-#   932497CNY010 = 中证A500价值全收益
-#   932494CNY010 = 中证A500成长全收益
-# 该数据独立内嵌为 a500StyleData 块（不进入 allData，避免污染估值仪表盘/指数选择器）。
-A500_VALUE_CODE = "932497CNY010"
-A500_GROWTH_CODE = "932494CNY010"
-# 对应的 Wind 代码（A500 价值 / 成长全收益）
-A500_VALUE_WIND = "932497CNY010.CSI"
-A500_GROWTH_WIND = "932494CNY010.CSI"
-
-
-def build_a500_style_js(existing_content):
-    """增量更新 a500StyleData 数据块，返回替换后的 JS 字符串；无变化返回 None。
-
-    与 allData 的增量逻辑一致：只拉取已保存日期前 14 个自然日至今，既补齐
-    节假日/延迟披露，又不会用远端数据覆盖网页历史序列。两指数按日期对齐，
-    仅保留两个序列都有的交易日（保证前端 log 比值可计算）。
-    """
-    m = re.search(r'let a500StyleData = (\{.*?\});', existing_content, re.DOTALL)
-    if not m:
-        print("⚠️ HTML 中未找到 a500StyleData 数据块，跳过 A500 风格数据更新。")
-        return None
-    try:
-        data = json.loads(m.group(1))
-    except ValueError as e:
-        print(f"⚠️ a500StyleData 数据块解析失败，跳过更新: {e}")
-        return None
-
-    dates = data.get("dates") or []
-    value = data.get("value") or []
-    growth = data.get("growth") or []
-    last_saved = max(dates) if dates else None
-
-    # 中证官网免费接口即可拿到全收益日频，不调用 Wind（省积分）
-    dv = fetch_csi_history(A500_VALUE_CODE, last_saved)
-    dg = fetch_csi_history(A500_GROWTH_CODE, last_saved)
-    # 中证接口偶发连接重置：单指数失败重试两次，避免 Action 单次抖动导致漏更
-    if not dv and last_saved:
-        for _ in range(2):
-            time.sleep(2)
-            dv = fetch_csi_history(A500_VALUE_CODE, last_saved)
-            if dv:
-                break
-    if not dg and last_saved:
-        for _ in range(2):
-            time.sleep(2)
-            dg = fetch_csi_history(A500_GROWTH_CODE, last_saved)
-            if dg:
-                break
-    if not dv and not dg:
-        print("⚠️ A500 价值/成长指数抓取均失败，保留现有数据。")
-        return None
-
-    vmap = dict(zip(dates, value))
-    gmap = dict(zip(dates, growth))
-    for d, v in dv.items():
-        vmap[d] = v
-    for d, g in dg.items():
-        gmap[d] = g
-    # 只保留两序列共有的日期，保持与网页一致的对齐结构
-    new_dates = sorted(d for d in set(vmap) | set(gmap) if d in vmap and d in gmap)
-    new_value = [round(vmap[d], 2) for d in new_dates]
-    new_growth = [round(gmap[d], 2) for d in new_dates]
-
-    if new_dates == dates and new_value == value and new_growth == growth:
-        print("A500 风格数据已是最新。")
-        return None
-    print(f"A500 风格数据：{len(dates)} → {len(new_dates)} 个交易日，最新 {new_dates[-1]}。")
-    new_data = {"dates": new_dates, "value": new_value, "growth": new_growth}
-    return "let a500StyleData = " + json.dumps(new_data, separators=(',', ':'), ensure_ascii=False) + ";"
 
 # 标普指数（SP 源）：官网有 Akamai 防护无法程序化抓取，更新策略分两层：
 #   1) 平时：用跟踪 ETF（红利低波50ETF南方 515450）的「累计净值」日收益推算
@@ -2624,34 +2708,46 @@ def dump_pepb_history(history):
     return f"const pepbHistory = {body};"
 
 
-def append_history_entry(history, index_name, trade_date, pe, pb):
+def append_history_entry(history, index_name, trade_date, pe, pb, dy=None):
     """把最新估值追加进内存中的历史序列（日期升序），返回是否写入。
 
     幂等但可纠正：同日期若已有记录，数值一致则跳过；数值不同则用本次结果覆盖。
     早期版本写的是「同日期一律跳过」，导致当天第一次抓到的临时值（如 Wind 盘中口径）
     永久留在序列里，与估值表展示的收盘口径对不上（分位也会跟着偏）。
+
+    dy（加权股息率）是后加的第三条通道：红利类指数只算股息率、没有 PE/PB，
+    「杠铃估值」的股息率−国债利差要靠它，所以这里也要一起落库。
     """
     key = _history_sheet_name(index_name)
     entry = history.setdefault(key, {"dates": [], "pe": [], "pb": []})
+    # 老序列没有 dy 通道：按已有长度补 None，保证三条数组等长
+    if "dy" not in entry:
+        entry["dy"] = [None] * len(entry["dates"])
+    while len(entry["dy"]) < len(entry["dates"]):
+        entry["dy"].append(None)
+
+    def _same(a, b):
+        if a == b:
+            return True
+        return a is not None and b is not None and abs(a - b) < 1e-9
+
     if trade_date in entry["dates"]:
         i = entry["dates"].index(trade_date)
-        same_pe = (entry["pe"][i] == pe) or (
-            entry["pe"][i] is not None and pe is not None and abs(entry["pe"][i] - pe) < 1e-9)
-        same_pb = (entry["pb"][i] == pb) or (
-            entry["pb"][i] is not None and pb is not None and abs(entry["pb"][i] - pb) < 1e-9)
-        if same_pe and same_pb:
+        if _same(entry["pe"][i], pe) and _same(entry["pb"][i], pb) and (dy is None or _same(entry["dy"][i], dy)):
             return False
-        entry["pe"][i] = pe
-        entry["pb"][i] = pb
+        entry["pe"][i] = pe if pe is not None else entry["pe"][i]
+        entry["pb"][i] = pb if pb is not None else entry["pb"][i]
+        if dy is not None:
+            entry["dy"][i] = dy
         return True
     entry["dates"].append(trade_date)
     entry["pe"].append(pe)
     entry["pb"].append(pb)
+    entry["dy"].append(dy)
     # 保持日期升序
     order = sorted(range(len(entry["dates"])), key=lambda i: entry["dates"][i])
-    entry["dates"] = [entry["dates"][i] for i in order]
-    entry["pe"] = [entry["pe"][i] for i in order]
-    entry["pb"] = [entry["pb"][i] for i in order]
+    for k in ("dates", "pe", "pb", "dy"):
+        entry[k] = [entry[k][i] for i in order]
     return True
 
 
@@ -2681,8 +2777,8 @@ def fetch_index_metrics(all_data=None):
     数据源以免费接口为主：成份股权重、个股行情、行业分布全部取自中证/国证官网
     权重文件 + 腾讯个股行情 + 红色火箭/CICS，不消耗 Wind 积分。
     Wind 只用三处：
-      1) 成长100R / 中证科技100 的官方加权 PB（PB 是这几只唯一展示的估值）；
-      2) 中证2000 的官方加权 PB（其余指标仍走中证官网免费接口，不按成份股自算 PB）；
+      1) 中证2000 的官方加权 PB（其余指标仍走中证官网免费接口，不按成份股自算 PB）；
+      2) 中证2000 首次补齐历史 PE/PB 序列（中证官网不提供历史）；
       3) 标普红利低波50 的实时成份股与申万行业（515450 持仓滞后一个报告期）。
     万得微盘股指数不在此循环，其 PB 由 update_html 里的 _apply_micro_daily 单独处理。
     各指数只算自己展示的那一项指标（valuation_metrics），不需要的指标不取数、不落库。
@@ -2717,8 +2813,8 @@ def fetch_index_metrics(all_data=None):
             else:
                 print(f"{name}：行业分布本周已尝试但未取到，本周跳过（下周自动重试）")
         weight_date = trade_date
-        # 只有需要「官方加权 PB」的指数才调用 Wind 估值接口（成长100R / 中证科技100 /
-        # 中证2000），其余指数一律用中证/国证官网权重 + 个股行情自算，不耗积分。
+        # 只有需要「官方加权 PB」的指数才调用 Wind 估值接口（目前仅中证2000），
+        # 其余指数一律用中证/国证官网权重 + 个股行情自算，不耗积分。
         if want_pb and name in WIND_PB_INDICES and wind_configured() and name in WIND_CODES:
             try:
                 wind_val = wind_index_valuation_full(name, trade_date)
@@ -2813,8 +2909,8 @@ def fetch_index_metrics(all_data=None):
                              else compute_weighted_dividend_yield(rows, quotes))
 
         block = None
-        # 整块估值都取 Wind 官方加权的指数（成长100R / 中证科技100）；
-        # 中证2000 不在其中——它只覆盖 PB，其余走免费源（见下方 FREE_ONLY_PB_OVERRIDE）。
+        # 整块估值都取 Wind 官方加权的指数：中证2000 只覆盖 PB，其余走免费源
+        # （见上方 FREE_ONLY_PB_OVERRIDE）。
         if wind_val and name not in FREE_ONLY_PB_OVERRIDE:
             vdate = wind_val.get("date") or trade_date
             # 部分指数（如标普红利低波50）单日快照不给 PE，日频序列里却有值，
@@ -3198,6 +3294,10 @@ def update_html(file_path):
     # 指数估值（成分股权重加权）：PE-TTM / PB / 加权股息率，以及市值分布 / 行业分布
     pepb_history = load_pepb_history(content)  # 从 HTML 内嵌块加载历史序列
     history_changed = False
+    # 国债收益率历史（杠铃估值用）：东财免费接口，每天增量合并，失败则沿用原序列
+    bond_old = load_bond_history(content)
+    bond_new = fetch_bond_yield_history(bond_old)
+    bond_changed = bool(bond_new) and bond_new != bond_old
 
     # 自愈：剔除历史序列里晚于「该指数最新点位日」的脏点。当天尚未收盘时，Wind 会把
     # 上一笔成交标成当天日期；pepbHistory 只追加不覆盖，不清掉就会永久留着一个与
@@ -3244,6 +3344,59 @@ def update_html(file_path):
                                   "pb": [_pb[d] for d in _alld]}
             history_changed = True
 
+    # 股息率历史补齐（杠铃「股息率 − 国债」利差图用）：老序列只有 PE/PB，红利/价值类
+    # 缺 dy。Wind 的指数股息率有长历史，这里一律取真值，不再用 PE 反推估算。
+    # 频次按指数分开：红利/价值类用月频（利差是慢变量，一次性约 2 次调用）；
+    # 标普红利低波50 用**周频**——它的股息率随调样分档跳变，月频台阶感太强，
+    # 一次性约 6 次调用，补过之后同样靠每天的加权股息率免费追加，不再调 Wind。
+    # 国信价值前置单列：它此前连 PE/PB 序列都没有，得先把整条序列建起来。
+    DY_BACKFILL_FREQ = {
+        "中证红利全收益": "每月最后一个交易日",
+        "智选高股息全收益": "每月最后一个交易日",
+        "红利低波全收益": "每月最后一个交易日",
+        "红利低波100全收益": "每月最后一个交易日",
+        "价值100全收益": "每月最后一个交易日",
+        "国信价值全收益": "每月最后一个交易日",
+        "标普红利低波50全收益": "每周最后一个交易日",
+    }
+    # 保险丝：Wind 只补到一半、或想强制作废估算值时，置 FORCE_DY_BACKFILL=1 重跑一次
+    _force_dy = os.environ.get("FORCE_DY_BACKFILL") == "1"
+
+    # 国信价值（H21052）：估值表里只有「当前值」，历史 PE/PB 从未补过，因此 pepbHistory
+    # 里连序列都没有。杠铃「防守端」下拉里有它，利差图需要一段股息率历史——首次用 Wind
+    # 月频补一段（约 2 次调用），建好之后每日靠加权股息率免费追加，不再调 Wind。
+    _gx_name = "国信价值全收益"
+    if _gx_name in all_data:
+        _gx_key = _history_sheet_name(_gx_name)
+        if not (pepb_history.get(_gx_key) or {}).get("dates"):
+            _seed = seed_pepb_history_from_wind(
+                _gx_name, ((all_data.get(_gx_name) or {}).get("dates") or ["2015-01-01"])[0],
+                want_dy=True, freq="每月最后一个交易日", min_points=60)
+            if _seed and _seed.get("dates"):
+                pepb_history[_gx_key] = {
+                    "dates": _seed["dates"],
+                    "pe": _seed["pe"],
+                    "pb": _seed["pb"],
+                    "dy": _seed["dy"],
+                }
+                history_changed = True
+                print(f"国信价值：已用 Wind 补 {len(_seed['dates'])} 个月频 PE/PB/股息率历史"
+                      f"（{_seed['dates'][0]} 起），杠铃利差图改为真实序列")
+
+    for _name, _freq in DY_BACKFILL_FREQ.items():
+        if _name not in all_data:
+            continue
+        _key = _history_sheet_name(_name)
+        _cached = pepb_history.get(_key) or {}
+        if not _cached.get("dates"):
+            continue
+        _changed, _msg = backfill_dy_history(_name, _cached, freq=_freq, force=_force_dy)
+        if _changed:
+            pepb_history[_key] = _cached
+            history_changed = True
+        if _changed or "跳过" not in _msg:
+            print(f"股息率历史 · {_name}：{_msg}")
+
     for name, blocks in fetch_index_metrics(all_data).items():
         if name not in all_data:
             continue
@@ -3254,9 +3407,10 @@ def update_html(file_path):
         # 先把当日估值写进内嵌历史序列（同日期数值有变则纠正），再算分位。
         # 顺序很重要：反过来的话，当天重复运行会拿「当天第一次抓到的旧值」当样本，
         # 分位与估值表展示的收盘口径就对不上。
-        if cur_pe and cur_pb and block.get("data_date"):
+        cur_dy = block.get("dividend_yield")
+        if block.get("data_date") and (cur_dy or (cur_pe and cur_pb)):
             if append_history_entry(pepb_history, name, block["data_date"],
-                                    cur_pe, cur_pb):
+                                    cur_pe, cur_pb, cur_dy):
                 history_changed = True
                 print(f"{name} 已写入/纠正 {block['data_date']} 估值至内嵌历史序列")
 
@@ -3304,10 +3458,7 @@ def update_html(file_path):
                 all_data[name]["profile"] = profile
                 updated_any = True
 
-    # A500 风格对比数据（大盘价值/成长）：独立内嵌块，随 Action 每日增量更新
-    a500_js = build_a500_style_js(content)
-
-    if updated_any or history_changed or a500_js:
+    if updated_any or history_changed or bond_changed:
         if updated_any:
             new_json = json.dumps(all_data, ensure_ascii=False, separators=(",", ":"))
             # 用完整匹配段替换，避免 JSON 子串与正文其他文本重复时误替换
@@ -3319,12 +3470,13 @@ def update_html(file_path):
                            + content[hist_match.end():])
             else:
                 print("⚠️ HTML 中未找到 pepbHistory 块，历史序列未写回")
-        if a500_js:
-            a5_match = re.search(r'let a500StyleData = \{.*?\};', content, re.DOTALL)
-            if a5_match:
-                content = content[:a5_match.start()] + a500_js + content[a5_match.end():]
+        if bond_changed:
+            bd_match = re.search(r'const bondYieldHistory = \{.*?\};', content, re.DOTALL)
+            if bd_match:
+                content = (content[:bd_match.start()] + dump_bond_history(bond_new)
+                           + content[bd_match.end():])
             else:
-                print("⚠️ HTML 中未找到 a500StyleData 块，A500 风格数据未写回")
+                print("⚠️ HTML 中未找到 bondYieldHistory 块，国债收益率未写回")
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(content)
         print("🎉 所有指数及图表指标已成功同步更新。")
