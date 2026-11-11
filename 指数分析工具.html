@@ -879,7 +879,7 @@
             <!-- 杠铃估值：微盘（进攻端） vs 价值/红利（防守端） -->
             <div id="micro-view-barbell" style="display:none;">
                 <p style="font-size:12px;color:#8b949e;line-height:1.55;margin:0 0 8px;">
-                    杠铃策略只买两端：一端微盘搏弹性，一端价值/红利收票息。这里回答两个问题——<b style="color:#c9d1d9;">微盘相对防守端跑到了什么位置</b>（看比值相对回归趋势的 z 值，越靠上越该往防守端倾斜），以及<b style="color:#c9d1d9;">两端的低相关还在不在</b>（杠铃失效预警）。
+                    杠铃只看两端：微盘搏弹性、红利收票息。两张图各答一个问题——<b style="color:#c9d1d9;">微盘相对防守端跑到了什么位置</b>（看 z 值），<b style="color:#c9d1d9;">两端低相关还在不在</b>。
                 </p>
                 <div class="selector" style="margin:0 0 8px;flex-wrap:wrap;align-items:center;">
                     <span style="font-size:12px;color:#8b949e;">防守端</span>
@@ -902,8 +902,8 @@
                     <div id="barbell-ratio-stats" style="font-size:13.5px;color:#c9d1d9;margin:2px 0 6px;"></div>
                     <div id="chart-barbell-ratio"></div>
                     <div style="font-size:11px;color:#8b949e;margin-top:4px;line-height:1.5;">
-                        比值 = 万得微盘股指数（价格口径，股息≈0）÷ 防守端<b>全收益</b>指数（含股息再投资），两者都以共同首日归一。微盘的长期年化远高于红利端，这条线天然向右上走，静态分位（P90/P10）几乎永远贴着上轨、判断不出高低，所以改用<b>回归通道</b>：白虚线为趋势（对 log 比值的线性回归，括号内是趋势年化），上下 ±1σ（灰虚线）、±2σ（红绿虚线）构成通道。
-                        <b>z 值</b>是当前值偏离趋势的标准差倍数：<b style="color:#f85149;">z ≥ +2</b> 说明微盘端显著跑过头、可向防守端倾斜；<b style="color:#3fb950;">z ≤ −2</b> 说明微盘端相对趋势超跌、可向微盘端倾斜；通道内（|z| &lt; 1）通常不必动。通道口径默认<b>近 10 年</b>（可选近 5 年 / 全样本，见上方下拉）——窗口越短，趋势越贴近近期节奏、对拐点更敏感，但也更容易被单段行情带偏。末端看不清时点标题右侧的<b>「⤢ 全览」</b>按钮，可在<b>全览 ⇄ 近 2 年</b>之间切换——放大后按可见区间重新绘制，纵轴与通道线一起重算，z 值所对应的位置看得更清楚（图不支持滚轮缩放，避免缩放残留旧线条）。
+                        比值 = 微盘（价格口径）÷ 防守端<b>全收益</b>，共同首日归一。这条线长期单边向上，分位判断不了高低，故看<b>回归通道</b>：白虚线为趋势，灰/红绿虚线为 ±1σ / ±2σ。通道默认<b>近 10 年</b>（可切近 5 年 / 全样本），右上<b>「⤢ 全览」</b>切 全览 / 近 2 年。
+                        <b>z</b> = 偏离趋势的标准差倍数：<b style="color:#f85149;">z ≥ +2</b> 微盘偏贵，向防守端倾斜；<b style="color:#3fb950;">z ≤ −2</b> 微盘超跌，向微盘倾斜；|z| &lt; 1 不必动。
                     </div>
                 </div>
 
@@ -1725,11 +1725,12 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
             const rank = zs.filter(v => v < curZ).length / zs.length * 100;
             const devPct = (Math.exp(cur - curTrend) - 1) * 100;
             const ann = (Math.exp(slope * 252) - 1) * 100;
-            let tone = ['#c9d1d9', '通道中部，暂不必动'];
-            if (curZ >= 2) tone = ['#f85149', '极端偏热，该向防守端倾斜'];
-            else if (curZ >= 1) tone = ['#f0883e', '偏热，可分步向防守端倾斜'];
-            else if (curZ <= -2) tone = ['#3fb950', '极端偏冷，可向微盘端倾斜'];
-            else if (curZ <= -1) tone = ['#56d364', '偏冷，可向微盘端倾斜'];
+            // 只给 z / 偏离上色，不输出「偏热 / 偏冷 / 该倾斜」这类结论——判断留给读图的人
+            let toneColor = '#c9d1d9';
+            if (curZ >= 2) toneColor = '#f85149';
+            else if (curZ >= 1) toneColor = '#f0883e';
+            else if (curZ <= -2) toneColor = '#3fb950';
+            else if (curZ <= -1) toneColor = '#56d364';
 
             const zoom = BARBELL_ZOOM_STEPS[barbellZoomIdx];
             // 放大改成「按可见区间切片后整张重画」，不再用 dataZoom 只挪可视窗口：
@@ -1741,10 +1742,9 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
             if (statsEl) {
                 statsEl.innerHTML = '当前比值 <b>' + Math.exp(cur).toFixed(2) + '</b>'
                     + '｜趋势 <b>' + Math.exp(curTrend).toFixed(2) + '</b>'
-                    + '｜偏离 <b style="color:' + tone[0] + '">' + (devPct >= 0 ? '+' : '') + devPct.toFixed(1) + '%</b>'
-                    + '｜z <b style="color:' + tone[0] + '">' + (curZ >= 0 ? '+' : '') + curZ.toFixed(2) + '</b>'
-                    + '<span style="color:#8b949e;font-size:13px;">（残差分位 ' + rank.toFixed(0) + '%）</span>'
-                    + '<span style="color:' + tone[0] + ';">（' + tone[1] + '）</span>';
+                    + '｜偏离 <b style="color:' + toneColor + '">' + (devPct >= 0 ? '+' : '') + devPct.toFixed(1) + '%</b>'
+                    + '｜z <b style="color:' + toneColor + '">' + (curZ >= 0 ? '+' : '') + curZ.toFixed(2) + '</b>'
+                    + '<span style="color:#8b949e;font-size:13px;">（残差分位 ' + rank.toFixed(0) + '%）</span>';
             }
             if (dateEl) dateEl.textContent = dates[disp] + ' ~ ' + dates[n - 1] + '（' + (n - disp) + ' 个交易日）';
             const legEl = document.getElementById('barbell-ratio-legend');
@@ -1831,11 +1831,9 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
             const noteEl = document.getElementById('barbell-corr-note');
             const box = document.getElementById('chart-barbell-corr');
             if (noteEl) {
-                noteEl.innerHTML = '相关系数用两端的<b>日收益率</b>计算（不用点位，避免共同趋势把相关性抬高），滚动窗口分别为 252 与 756 个共同交易日。'
-                    + '橙虚线 0.60 为警戒位：1 年相关性长期站上 0.6 说明跷跷板变成同涨同跌，此时再平衡不再「收割波动」而只是摊薄成本；'
-                    + '绿虚线 0.30 以下为低相关区，杠铃的对冲效果最好。图上只画<b>近 10 年</b>（不支持滚轮缩放，期间固定），分位与均值都按这 10 年算；'
-                    + '风格极端行情（如 2024 年初微盘流动性危机）里这条线会明显抬升，可用来解释组合当时为何失灵；'
-                    + '曲线上偶尔出现的竖直“台阶”是这类极端单日行情滚出窗口造成的（窗口边缘效应），不是数据错误。';
+                noteEl.innerHTML = '用两端<b>日收益率</b>滚动计算（窗口 252 / 756 个共同交易日），只画<b>近 10 年</b>。'
+                    + '<b>> 0.60</b>（橙）＝跷跷板变同涨同跌，再平衡只是摊薄成本；<b>&lt; 0.30</b>（绿）＝低相关区，对冲效果最好。'
+                    + '曲线上的竖直「台阶」是极端单日行情滚出窗口的边缘效应，不是数据错误。';
             }
             const mic = allData['万得微盘股指数'];
             const dfd = allData[defName];
