@@ -726,7 +726,9 @@ def wind_index_valuation(windcode="868008.WI", trade_date=None):
                     pe = float(val)
     if pb is None:
         return None
-    # PB 改用逐日序列取当日收盘值：单日快照查询会滞后一日（见 wind_index_pb_series）
+    # PB 改用逐日序列取当日收盘值：单日快照查询会滞后一日（见 wind_index_pb_series）。
+    # 顺便把整段序列回传给调用方，用来校正 pb_daily 里可能已存在的滞后脏点。
+    series = {}
     if trade_date:
         try:
             begin = (datetime.strptime(trade_date, "%Y-%m-%d")
@@ -737,7 +739,8 @@ def wind_index_valuation(windcode="868008.WI", trade_date=None):
         except Exception as e:
             print(f"微盘估值：PB 序列查询失败，沿用快照值 {pb}: {e}")
     return {"pb": round(pb, 4), "pe": round(pe, 4) if pe is not None else None,
-            "mcap": round(mcap, 4) if mcap is not None else None, "date": data_date}
+            "mcap": round(mcap, 4) if mcap is not None else None, "date": data_date,
+            "series": series}
 
 
 def fetch_risk_free_rate():
@@ -804,6 +807,54 @@ def fetch_etf_from_eastmoney(code, market):
     return {}
 
 
+def fetch_etf_from_kline(code, market):
+    """日 K 线兜底：取最后一根收盘价，解决盘前（快照最新价为 0）ETF 不更新的问题。
+
+    主用腾讯 `newfqkline`（与美股指数同一个接口，A 股 ETF 也返回 day 数组，
+    最后一根可能是当日盘中价，与快照口径一致）；东财 push2his 作备选——
+    该域名对连续请求较敏感，实测会间歇性 RemoteDisconnected，不能当唯一来源。
+    口径：**不复权**（param 不传 fq），因为「现价 ÷ 前高对应价」按真实成交价换算，
+    复权价会与历史点位对不上。
+    """
+    symbol = f"{market}{code}"
+    try:
+        r = _request_with_retry(
+            US_KLINE_URL, params={"param": f"{symbol},day,,,5,"},
+            headers=US_KLINE_HEADERS, timeout=20)
+        data = r.json().get("data")
+        rows = ((data or {}).get(symbol) or {}).get("day") or []
+        if rows:
+            last = rows[-1]
+            if len(last) >= 3 and last[2] is not None:
+                close = float(last[2])
+                if close > 0:
+                    return {"price": round(close, 4), "quote_date": str(last[0])}
+    except (requests.RequestException, ValueError, TypeError, KeyError):
+        pass
+
+    secid = f"{SECID_PREFIX.get(market, '1')}.{code}"
+    try:
+        r = _request_with_retry(
+            "https://push2his.eastmoney.com/api/qt/stock/kline/get",
+            params={"secid": secid, "fields1": "f1,f2,f3,f4,f5,f6",
+                    "fields2": "f51,f52,f53", "klt": "101", "fqt": "0",
+                    "end": "20500101", "lmt": "5"},
+            headers={"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/"},
+            timeout=20)
+        data = r.json().get("data") or {}
+        klines = data.get("klines") or []
+        if klines:
+            parts = klines[-1].split(",")
+            if len(parts) >= 3:
+                close = float(parts[2])
+                if close > 0:
+                    return {"price": round(close, 4), "name": data.get("name") or "",
+                            "quote_date": parts[0]}
+    except (requests.RequestException, ValueError, TypeError, KeyError):
+        pass
+    return {}
+
+
 def fetch_etf_from_sina(code, market):
     """新浪行情接口，作为东方财富不可用时的备用源。"""
     url = "https://hq.sinajs.cn/list=" + f"{market}{code}"
@@ -860,8 +911,16 @@ def fetch_etf_quotes_batch_sina():
             if len(fields) < 32:
                 continue
             try:
+                price = float(fields[3])
+            except (ValueError, IndexError):
+                continue
+            # 盘前（约 09:15 之前）新浪给的最新价是 0.000，不能当收盘价写库，
+            # 也不能算「取到了」——留空让 fetch_etf_quote 走东财兜底或保留旧值。
+            if price <= 0:
+                continue
+            try:
                 quotes[matched.group(1)] = {
-                    "price": float(fields[3]),
+                    "price": price,
                     "prev_close": float(fields[2]),
                     "name": fields[0],
                     "quote_date": fields[30],
@@ -873,17 +932,21 @@ def fetch_etf_quotes_batch_sina():
         return {}
 
     missing = [c for c in codes if c not in quotes]
-    print(f"新浪批量行情：获取 {len(quotes)}/{len(codes)} 只 ETF" + (f"，缺失 {','.join(missing)}" if missing else ""))
+    print(f"新浪批量行情：获取 {len(quotes)}/{len(codes)} 只 ETF"
+          + (f"，无有效报价 {','.join(missing)}（盘前或停牌）" if missing else ""))
     return quotes
 
 
 def fetch_etf_quote(etf_meta, batch_quotes=None):
     """优先复用批量结果，再按 东方财富 -> 新浪单只 的顺序兜底。"""
-    if batch_quotes and etf_meta["code"] in batch_quotes:
-        return batch_quotes[etf_meta["code"]]
-    for fetcher in (fetch_etf_from_eastmoney, fetch_etf_from_sina):
+    hit = (batch_quotes or {}).get(etf_meta["code"])
+    if hit and hit.get("price"):
+        return hit
+    # 兜底顺序：东财快照 → 新浪快照 → 东财日K。
+    # 日K 放最后，专门解决盘前运行（快照最新价为 0）时 ETF 整天不更新的问题。
+    for fetcher in (fetch_etf_from_eastmoney, fetch_etf_from_sina, fetch_etf_from_kline):
         quote = fetcher(etf_meta["code"], etf_meta["market"])
-        if quote.get("price"):
+        if quote.get("price") and quote["price"] > 0:
             return quote
     return {}
 
@@ -1370,11 +1433,17 @@ def fetch_micro_valuation_snapshot():
 def _apply_micro_daily(data_obj, trade_date):
     """写入当日 PB / 市值中位数到 pb_daily、mcap_daily（同日覆盖），并同步估值表。
 
-    首选 Wind 官方加权 PB 与成份股总市值中位数（一次接口调用同时取到）；
+    首选 Wind 官方加权 PB 与成份股总市值中位数；
     Wind 不可用时回退：官方区间内跳过，之后用全市场市值最小 400 只自算。
+
+    PB 与市值中位数**解耦**：2026-11-13 实测 Wind 的 `get_index_fundamentals`
+    对指定日期只回「市净率 / 市盈率」，不再返回「成份股总市值中位数」。
+    原先两者必须同时具备才写库，结果 PB 永久停在上一交易日（点位照常更新）。
+    现在 PB 拿到就写，市值缺失时沿用上一次的值。
     """
     snap = None
     source = ""
+    wv = None
     if wind_configured():
         try:
             wv = wind_index_valuation("868008.WI", trade_date)
@@ -1382,10 +1451,16 @@ def _apply_micro_daily(data_obj, trade_date):
                 # 接口未按指定日期返回（拿到的是上一交易日）时不予采信，避免把旧值当当日值
                 if wv.get("date") and wv["date"] != trade_date:
                     print(f"微盘估值：Wind 返回日期 {wv['date']} 与目标 {trade_date} 不符，本次不采用。")
-                elif wv.get("mcap") is None:
-                    print("微盘估值：Wind 未返回市值中位数，本次不采用。")
                 else:
-                    snap = {"pb": wv["pb"], "mcap": wv["mcap"], "pe": wv.get("pe")}
+                    mcap = wv.get("mcap")
+                    if mcap is None:
+                        prev = (data_obj.get("mcap_daily") or {}).get("value") or []
+                        mcap = prev[-1] if prev else None
+                        if mcap is None:
+                            print(f"微盘估值：Wind 未返回市值中位数、本地也没有可沿用的值，{trade_date} 只写 PB。")
+                        else:
+                            print(f"微盘估值：Wind 未返回市值中位数，沿用上一次 {mcap} 亿元（PB 照常更新）。")
+                    snap = {"pb": wv["pb"], "mcap": mcap, "pe": wv.get("pe")}
                     source = "Wind 官方（868008.WI 加权PB）"
         except Exception as e:
             print(f"⚠️ 微盘估值：Wind 官方接口失败，改走自算: {e}")
@@ -1398,6 +1473,14 @@ def _apply_micro_daily(data_obj, trade_date):
         if not snap:
             return False
         source = "脚本自算·全市场市值最小400只"
+        # 兜底值不覆盖已经存在的当日值：官方加权 PB 与「市值最小 400 只自算」是两个口径
+        # （实测同日 2.1332 vs 2.0606，差 3.5%，分位会从 66% 跳到 16%）。Wind 偶发失败时
+        # 若放任自算覆盖，页面上的 PB 曲线会来回跳口径，看分位的人会被误导。
+        _pbd0 = data_obj.get("pb_daily") or {}
+        if _pbd0.get("dates") and _pbd0["dates"][-1] == trade_date:
+            print(f"微盘估值：{trade_date} 已有 PB {_pbd0['pb'][-1]}，"
+                  f"自算兜底 {snap['pb']} 不覆盖（口径不同，避免来回跳）。")
+            return False
 
     changed = False
 
@@ -1407,6 +1490,16 @@ def _apply_micro_daily(data_obj, trade_date):
         point = data_obj["values"][data_obj["dates"].index(trade_date)]
 
     pbd = data_obj.get("pb_daily")
+    # 用 Wind 的日频序列校正最近 12 天的历史值：单日快照查询会滞后一日，
+    # 早期版本曾把「前一日 PB」写进当日（如 11-06 写成 11-05 的 2.0873），
+    # 这里顺手改回序列值，不再需要手工修数据。
+    series = (wv or {}).get("series") or {}
+    if pbd and series and pbd.get("dates"):
+        for i, d in enumerate(pbd["dates"]):
+            v = series.get(d)
+            if v and i < len(pbd["pb"]) and abs(pbd["pb"][i] - v) > 0.0005:
+                pbd["pb"][i] = v
+                changed = True
     if pbd is not None:
         if pbd["dates"] and pbd["dates"][-1] == trade_date:
             if abs(pbd["pb"][-1] - snap["pb"]) > 0.0005:
@@ -1422,16 +1515,18 @@ def _apply_micro_daily(data_obj, trade_date):
     md = data_obj.get("mcap_daily")
     if md is None:
         md = data_obj["mcap_daily"] = {"dates": [], "value": [], "point": []}
-    if md["dates"] and md["dates"][-1] == trade_date:
-        if abs(md["value"][-1] - snap["mcap"]) > 0.005:
-            md["value"][-1] = snap["mcap"]
-            md["point"][-1] = point
+    # 市值缺失（Wind 不再返回）时不写空值，保留已有序列的最后一天
+    if snap["mcap"] is not None:
+        if md["dates"] and md["dates"][-1] == trade_date:
+            if abs(md["value"][-1] - snap["mcap"]) > 0.005:
+                md["value"][-1] = snap["mcap"]
+                md["point"][-1] = point
+                changed = True
+        elif not md["dates"] or trade_date > md["dates"][-1]:
+            md["dates"].append(trade_date)
+            md["value"].append(snap["mcap"])
+            md["point"].append(point)
             changed = True
-    elif not md["dates"] or trade_date > md["dates"][-1]:
-        md["dates"].append(trade_date)
-        md["value"].append(snap["mcap"])
-        md["point"].append(point)
-        changed = True
 
     val = data_obj.setdefault("valuation", {})
     # 分位样本一律取「近 10 年」。pb_daily 已覆盖 2016-11 起的日频，直接用；
@@ -2587,6 +2682,7 @@ def update_html(file_path):
 
     # 先批量取一次全部 ETF 行情，避免逐只请求被限流
     batch_quotes = fetch_etf_quotes_batch_sina()
+    etf_missing = []   # 本轮未取到有效价的 ETF，循环结束后合并成一条提示
 
     for item in INDEX_CONFIG:
         code, name, source = item["code"], item["name"], item["source"]
@@ -2752,7 +2848,7 @@ def update_html(file_path):
                         f"（{block.get('price_date')}）：分位线对应价格已同步"
                     )
             else:
-                print(f"⚠️ {name} 对应 ETF {etf_meta['code']} 行情抓取失败，保留上一次价格。")
+                etf_missing.append(f"{name}({etf_meta['code']})")
 
             # 同步「ETF 收益 vs 全收益指数收益」的跟踪对比数据（来源：天天基金）
             try:
@@ -2779,6 +2875,10 @@ def update_html(file_path):
                     else ""
                 )
                 print(f"{name} 跟踪数据已同步（{len(hit)} 个阶段 / {len(tracking['years'])} 个年度）{extra}")
+
+    if etf_missing:
+        print(f"⚠️ 本轮有 {len(etf_missing)} 只 ETF 未取到有效报价（盘前运行或接口异常），"
+              f"已保留上一次价格：{'、'.join(etf_missing)}")
 
     # 指数估值（成分股权重加权）：PE-TTM / PB / 加权股息率，以及市值分布 / 行业分布
     pepb_history = load_pepb_history(content)  # 从 HTML 内嵌块加载历史序列
