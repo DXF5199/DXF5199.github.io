@@ -39,6 +39,7 @@ INDEX_CONFIG = [
     {"code": "932305CNY010", "name": "智选高股息全收益", "source": "CSI", "wind_code": "932305CNY010.CSI"},
     {"code": "H20269", "name": "红利低波全收益", "source": "CSI", "wind_code": "H20269.CSI"},
     {"code": "H20955", "name": "红利低波100全收益", "source": "CSI", "wind_code": "H20955.CSI"},
+    {"code": "931848CNY010", "name": "800红利低波全收益", "source": "CSI", "wind_code": "931848CNY010.CSI"},
     {"code": "932422CNY010", "name": "A500红利低波全收益", "source": "CSI", "wind_code": "932422CNY010.CSI"},
     # 中证国信价值全收益（H21052）：价格指数 931052，估值权重走中证官网免费文件；
     # 点位自 2026-11-13 起改取 Wind（H21052.CSI），与其余中证指数一致。
@@ -85,6 +86,7 @@ ETF_CONFIG = {
     "智选高股息全收益":   {"code": "159207", "market": "sz", "name": "高股息ETF广发"},
     "红利低波全收益":     {"code": "563020", "market": "sh", "name": "红利低波ETF易方达"},
     "红利低波100全收益":  {"code": "159307", "market": "sz", "name": "红利低波100ETF博时"},
+    "800红利低波全收益":  {"code": "158023", "market": "sz", "name": "红利低波ETF万家"},
     "A500红利低波全收益": {"code": "563510", "market": "sh", "name": "A500红利低波ETF易方达"},
     "价值100全收益":      {"code": "159263", "market": "sz", "name": "价值ETF易方达"},
     "标普红利低波50全收益": {"code": "515450", "market": "sh", "name": "红利低波50ETF南方"},
@@ -99,6 +101,7 @@ VALUATION_CONFIG = {
     "智选高股息全收益": ("932305", "CSI"),
     "红利低波全收益": ("H30269", "CSI"),
     "红利低波100全收益": ("930955", "CSI"),
+    "800红利低波全收益": ("931848", "CSI"),
     "A500红利低波全收益": ("932422", "CSI"),
     "国信价值全收益": ("931052", "CSI"),
     "价值100全收益": ("480081", "CNI"),
@@ -212,6 +215,7 @@ WIND_CODES = {
     "智选高股息全收益": "932305CNY010.CSI",
     "红利低波全收益": "H20269.CSI",
     "红利低波100全收益": "H20955.CSI",
+    "800红利低波全收益": "931848CNY010.CSI",
     "A500红利低波全收益": "932422CNY010.CSI",
     "国信价值全收益": "H21052.CSI",
     "价值100全收益": "480081.CNI",
@@ -248,7 +252,7 @@ PB_ONLY_INDICES = {
 }
 DY_ONLY_INDICES = {
     "中证红利全收益", "智选高股息全收益", "红利低波全收益",
-    "红利低波100全收益", "A500红利低波全收益", "标普红利低波50全收益",
+    "红利低波100全收益", "800红利低波全收益", "A500红利低波全收益", "标普红利低波50全收益",
     "价值100全收益", "国信价值全收益",
 }
 # 仍需向 Wind 取「官方加权 PB」的指数（其余指数不再调用 Wind 估值接口）：
@@ -1148,8 +1152,18 @@ def build_tracking_block(data_obj, etf_meta):
         fund_age_years = (datetime.strptime(last_date_str, "%Y-%m-%d")
                           - datetime.strptime(inception, "%Y-%m-%d")).days / 365.25
 
+    # 「今年来」的参考起点是上一年最后一个交易日：基金若在该起点之后才成立，
+    # 天天基金的「今年来」字段会回退成成立以来或占位值，与指数 YTD 不可比
+    # （例如 2026-08 成立的 158023 会返回 -10.49% 的假值，产生 -17pct 的假跟踪差）。
+    ytd_ok = True
+    if inception and last_date_str:
+        ytd_ref = f"{int(last_date_str[:4]) - 1}-12-31"
+        ytd_ok = inception <= ytd_ref
+
     periods = []
     for label, need_years in TRACKING_PERIODS:
+        if label == "今年来" and not ytd_ok:
+            continue  # 基金在当年才成立，「今年来」不可比
         if fund_age_years is not None and need_years and fund_age_years < need_years:
             continue  # 存续不足，该阶段不可比
         fund_value = fund_periods.get(label)
