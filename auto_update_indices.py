@@ -85,7 +85,7 @@ ETF_CONFIG = {
     "智选高股息全收益":   {"code": "159207", "market": "sz", "name": "高股息ETF广发"},
     "红利低波全收益":     {"code": "563020", "market": "sh", "name": "红利低波ETF易方达"},
     "红利低波100全收益":  {"code": "159307", "market": "sz", "name": "红利低波100ETF博时"},
-    "A500红利低波全收益": {"code": "563510", "market": "sh", "name": "A500红利低波ETF易方达"},
+    "A500红利低波全收益": {"code": "560570", "market": "sh", "name": "A500红利ETF国联安"},
     "价值100全收益":      {"code": "159263", "market": "sz", "name": "价值ETF易方达"},
     "标普红利低波50全收益": {"code": "515450", "market": "sh", "name": "红利低波50ETF南方"},
 }
@@ -537,7 +537,10 @@ def wind_index_pb_series(windcode="868008.WI", begin_date=None, end_date=None):
     序列给 2.0873，后者才与当日 +2.93% 的涨幅吻合），因此 PB 一律以本函数为准。
     单次最多返回 100 个交易日，长区间需由调用方分段。
     """
-    question = (f"请逐行列出万得微盘股指数({windcode})在{begin_date}至{end_date}"
+    # 问法里只写 Wind 代码、不能带指数中文名：带「万得微盘股指数」时，Wind 会
+    # 忽略括号里的代码而按名字取数——传入 932000.CSI 也会返回微盘的 PB（实测
+    # 2026-11-16 微盘 1.9314 / 中证2000 2.161，带名字时两者都给了 1.9314）。
+    question = (f"请逐行列出指数({windcode})在{begin_date}至{end_date}"
                 f"期间每个交易日的市净率PB，按日期升序，不要汇总")
     doc = json.loads(_wind_call("get_index_fundamentals", {"question": question}))
     blocks = (doc.get("data") or {}).get("data") or []
@@ -703,31 +706,36 @@ def wind_index_valuation(windcode="868008.WI", trade_date=None):
         when = f"{int(y)}年{int(m)}月{int(d)}日"
     else:
         when = "最新交易日"
-    question = (f"查询万得微盘股指数({windcode}){when}的市净率PB、市盈率PE，"
-                f"以及成份股总市值中位数")
-    doc = json.loads(_wind_call("get_index_fundamentals", {"question": question}))
-    blocks = (doc.get("data") or {}).get("data") or []
+    # 单日快照只用来拿 PE / 市值中位数 / 日期；PB 以逐日序列为准（快照常滞后一日）。
+    # 关键：快照解析失败时**不能直接放弃**——序列里往往仍有当天的 PB。
+    # 旧版在取序列之前就 `if pb is None: return None`，导致快照一失效，
+    # 逐日序列这条更可靠的路径根本不会执行，pb_daily 就永久停更。
     pb = pe = mcap = None
     data_date = None
-    for blk in blocks:
-        names = [c.get("name", "") for c in blk.get("columns") or []]
-        for row in blk.get("rows") or []:
-            for name, val in zip(names, row):
-                # 「交易时间」形如 20261105 15:00:02，比「日期」列更常返回，优先采信
-                if "交易时间" in name and val:
-                    data_date = _norm_wind_date(val) or data_date
-                elif name == "日期" and val:
-                    data_date = _norm_wind_date(val) or data_date
-                elif "市值中位数" in name and isinstance(val, (int, float)):
-                    mcap = float(val)
-                elif "市净率" in name and isinstance(val, (int, float)):
-                    pb = float(val)
-                elif "市盈率" in name and isinstance(val, (int, float)):
-                    pe = float(val)
-    if pb is None:
-        return None
-    # PB 改用逐日序列取当日收盘值：单日快照查询会滞后一日（见 wind_index_pb_series）。
-    # 顺便把整段序列回传给调用方，用来校正 pb_daily 里可能已存在的滞后脏点。
+    try:
+        question = f"查询指数({windcode}){when}的市净率PB、市盈率PE"
+        doc = json.loads(_wind_call("get_index_fundamentals", {"question": question}))
+        blocks = (doc.get("data") or {}).get("data") or []
+        for blk in blocks:
+            names = [c.get("name", "") for c in blk.get("columns") or []]
+            for row in blk.get("rows") or []:
+                for name, val in zip(names, row):
+                    # 「交易时间」形如 20261105 15:00:02，比「日期」列更常返回，优先采信
+                    if "交易时间" in name and val:
+                        data_date = _norm_wind_date(val) or data_date
+                    elif name == "日期" and val:
+                        data_date = _norm_wind_date(val) or data_date
+                    elif "市值中位数" in name and isinstance(val, (int, float)):
+                        mcap = float(val)
+                    elif "市净率" in name and isinstance(val, (int, float)):
+                        pb = float(val)
+                    elif "市盈率" in name and isinstance(val, (int, float)):
+                        pe = float(val)
+    except Exception as e:
+        print(f"微盘估值：单日快照查询失败，改由逐日序列取值: {e}")
+
+    # 逐日序列：PB 的权威来源（单日快照会滞后一日，见 wind_index_pb_series）。
+    # 整段序列一并回传，调用方用它校正滞后值、并补齐漏跑的交易日。
     series = {}
     if trade_date:
         try:
@@ -736,8 +744,12 @@ def wind_index_valuation(windcode="868008.WI", trade_date=None):
             series = wind_index_pb_series(windcode, begin, trade_date)
             if series.get(trade_date):
                 pb = series[trade_date]
+                data_date = data_date or trade_date
         except Exception as e:
             print(f"微盘估值：PB 序列查询失败，沿用快照值 {pb}: {e}")
+
+    if pb is None:
+        return None
     return {"pb": round(pb, 4), "pe": round(pe, 4) if pe is not None else None,
             "mcap": round(mcap, 4) if mcap is not None else None, "date": data_date,
             "series": series}
@@ -1127,6 +1139,11 @@ def build_tracking_block(data_obj, etf_meta):
     """
     code = etf_meta["code"]
     prev = data_obj.get("tracking") or {}
+    # 缓存只在「同一只基金」之间有效：换 ETF（如 A500 由 563510 换成 560570）时，
+    # 旧基金的成立日会被当成新基金的，进而把「今年来」可比性、阶段涨幅剔除判断
+    # 全部算错（560570 成立于 2025-09-10，沿用 563510 的 2025-11-17 就会误判）。
+    if str(prev.get("fund_code") or "") != str(code):
+        prev = {}
     index_returns = compute_index_returns(data_obj)
     fund_periods = fetch_fund_period_returns(code)
 
@@ -1504,12 +1521,35 @@ def _apply_micro_daily(data_obj, trade_date):
     # 早期版本曾把「前一日 PB」写进当日（如 11-06 写成 11-05 的 2.0873），
     # 这里顺手改回序列值，不再需要手工修数据。
     series = (wv or {}).get("series") or {}
-    if pbd and series and pbd.get("dates"):
+    if pbd is not None and series and pbd.get("dates"):
+        # 1) 校正已有日期的滞后值
         for i, d in enumerate(pbd["dates"]):
             v = series.get(d)
             if v and i < len(pbd["pb"]) and abs(pbd["pb"][i] - v) > 0.0005:
                 pbd["pb"][i] = v
                 changed = True
+        # 2) 补齐漏跑的交易日：序列有值、pb_daily 里没有、且不晚于 trade_date。
+        #    手动触发的 Action 常常隔几天才跑一次（11-09/11-10/11-12 这种缺口），
+        #    若只写「当前这一天」，中间的日子就永久缺失，图上也连不起来。
+        have = set(pbd["dates"])
+        extra = sorted((d, v) for d, v in series.items()
+                       if d not in have and d <= trade_date and v)
+        if extra:
+            _dates_idx = {d: i for i, d in enumerate(data_obj.get("dates") or [])}
+            for d, v in extra:
+                pt = None
+                if d in _dates_idx:
+                    pt = data_obj["values"][_dates_idx[d]]
+                pbd["dates"].append(d)
+                pbd["pb"].append(v)
+                pbd["point"].append(pt)
+            order = sorted(range(len(pbd["dates"])), key=lambda i: pbd["dates"][i])
+            pbd["dates"] = [pbd["dates"][i] for i in order]
+            pbd["pb"] = [pbd["pb"][i] for i in order]
+            pbd["point"] = [pbd["point"][i] for i in order]
+            changed = True
+            print(f"微盘估值：用逐日序列补齐 {len(extra)} 个漏跑交易日"
+                  f"（{extra[0][0]} ~ {extra[-1][0]}）")
     if pbd is not None:
         if pbd["dates"] and pbd["dates"][-1] == trade_date:
             if abs(pbd["pb"][-1] - snap["pb"]) > 0.0005:
@@ -2369,6 +2409,53 @@ def append_history_entry(history, index_name, trade_date, pe, pb):
     return True
 
 
+def backfill_free_only_pepb(history, index_name, end_date, lookback_days=24):
+    """用 Wind 逐日序列补齐「只写当天」的指数最近缺失交易日，返回是否改动。
+
+    中证2000 这类免费源指数每天只由 append_history_entry 写「运行当天」一行。
+    Action 是手动触发、常隔几天才跑一次，中间的日子就永久缺失：「微盘 PB /
+    中证2000 PB」比值图是两条序列的日期交集，缺一天就断一个点。这里拉最近
+    一段时间（自然日 24 天 ≈ 16 个交易日）的 PE/PB 序列，只补本地没有的日期，
+    已有自算值不动，顺带纠正与 Wind 偏差过大的滞后脏点。
+    """
+    key = _history_sheet_name(index_name)
+    code = WIND_CODES.get(index_name)
+    if not code or not wind_configured():
+        return False
+    begin = (datetime.strptime(end_date, "%Y-%m-%d")
+             - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+    try:
+        pe_map, pb_map = wind_index_pepb_series(code, begin, end_date)
+    except Exception as e:
+        print(f"⚠️ {index_name}：PE/PB 序列补齐失败（{str(e)[:60]}）")
+        return False
+    if not pe_map and not pb_map:
+        return False
+
+    cur = history.get(key) or {}
+    pe = dict(zip(cur.get("dates") or [], cur.get("pe") or []))
+    pb = dict(zip(cur.get("dates") or [], cur.get("pb") or []))
+    added = corrected = 0
+    for store, series in ((pb, pb_map), (pe, pe_map)):
+        for d, v in series.items():
+            if d > end_date:
+                continue
+            if d not in store:
+                store[d] = v
+                added += 1
+            elif store[d] and abs(store[d] - v) > 0.0005:
+                store[d] = v
+                corrected += 1
+    if not added and not corrected:
+        return False
+    alld = sorted(set(pe) | set(pb))
+    history[key] = {"dates": alld,
+                    "pe": [pe.get(d) for d in alld],
+                    "pb": [pb.get(d) for d in alld]}
+    print(f"{index_name}：PE/PB 序列补齐 {added} 个日期、纠正 {corrected} 个（至 {end_date}）")
+    return True
+
+
 def percentile_in_10y(dates, values, current):
     """current 在近10年历史序列中的分位%（0~100，越高代表当前估值越贵）。
 
@@ -2442,6 +2529,21 @@ def fetch_index_metrics(all_data=None):
                 wind_val = wind_index_valuation_full(name, trade_date)
             except Exception as e:
                 print(f"⚠️ {name}：Wind 官方 PB 获取失败（{str(e)[:70]}），回退成份股自算。")
+            # 单日快照没给 PB 时，用逐日序列兜底（与微盘同源的 get_index_fundamentals
+            # 「逐行列出每日市净率」问法，比单日快照稳），否则中证2000 PB 会跟着停更。
+            if (wind_val is None or wind_val.get("pb") is None) and trade_date:
+                try:
+                    _code = WIND_CODES.get(name)
+                    _b = (datetime.strptime(trade_date, "%Y-%m-%d")
+                          - timedelta(days=12)).strftime("%Y-%m-%d")
+                    _s = wind_index_pb_series(_code, _b, trade_date)
+                    if _s.get(trade_date):
+                        wind_val = dict(wind_val or {})
+                        wind_val.update({"pb": _s[trade_date],
+                                         "date": wind_val.get("date") or trade_date})
+                        print(f"{name}：单日快照未给 PB，改用逐日序列值 {_s[trade_date]}")
+                except Exception as e:
+                    print(f"⚠️ {name}：PB 逐日序列兜底失败（{str(e)[:70]}）")
         elif name in FREE_ONLY_INDICES:
             print(f"{name}：成份股/估值用中证官网免费数据（点位已改 Wind）")
 
@@ -2954,6 +3056,11 @@ def update_html(file_path):
                                     cur_pe, cur_pb):
                 history_changed = True
                 print(f"{name} 已写入/纠正 {block['data_date']} 估值至内嵌历史序列")
+            # 免费源指数只写当天一行，手动触发的 Action 会漏掉中间交易日，
+            # 让「微盘 PB / 中证2000 PB」比值图出现断点——用序列补齐最近一段。
+            if name in FREE_ONLY_INDICES:
+                if backfill_free_only_pepb(pepb_history, name, block["data_date"]):
+                    history_changed = True
 
         # 近10年估值分位：当前整体法 PE/PB 在内嵌历史序列中的位置
         # （只对页面展示的指标算；红利类不再有 PE/PB，自然也不写分位）
@@ -3013,6 +3120,18 @@ def update_html(file_path):
                 print("⚠️ HTML 中未找到 pepbHistory 块，历史序列未写回")
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(content)
+        # 数据时效汇总：比值图取「微盘 PB ∩ 中证2000 PB」的交集，
+        # 任一序列停更图就停在较早那天。这里把四条末日期直接打出来便于比对。
+        _md = all_data.get("万得微盘股指数") or {}
+        _mb = (_md.get("pb_daily") or {}).get("dates") or []
+        _mp = _md.get("dates") or []
+        _c2 = all_data.get("中证2000全收益") or {}
+        _c2p = _c2.get("dates") or []
+        _c2h = (pepb_history.get("中证2000") or {}).get("dates") or []
+        print("📅 数据时效汇总（排查「图停在某天」用）：")
+        print(f"   微盘点位末日 {_mp[-1] if _mp else '—'} ｜ 微盘 PB 末日 {_mb[-1] if _mb else '—'}")
+        print(f"   中证2000 点位末日 {_c2p[-1] if _c2p else '—'} ｜ 中证2000 PB 末日 {_c2h[-1] if _c2h else '—'}")
+        print("   ↑ 比值图取两列 PB 的交集，任一停更，图就停在较早的那天")
         print("🎉 所有指数及图表指标已成功同步更新。")
     else:
         print("ℹ️ 所有数据及指标已是最新。")
