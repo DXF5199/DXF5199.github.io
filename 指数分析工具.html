@@ -112,6 +112,17 @@
         
         /* 缩小净值图高度 */
         #chart-main { width: 100%; height: 250px; }
+        /* 净值走势图下方的「规则修改」横向说明条（图表外、不透明、不遮曲线） */
+        .rule-change-note { display: none; flex-wrap: wrap; justify-content: center; gap: 10px; margin-top: 10px; }
+        .rule-change-note .rc-item { display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px; border-radius: 4px; font-size: 12px; background: #0d1117; border: 1px solid #30363d; line-height: 1; }
+        .rule-change-note .rc-item.warn { border-color: rgba(248, 81, 73, 0.55); }
+        .rule-change-note .rc-item.ok { border-color: rgba(63, 185, 80, 0.55); }
+        .rule-change-note .rc-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
+        .rule-change-note .rc-date { color: #e6edf3; font-weight: 600; font-variant-numeric: tabular-nums; }
+        .rule-change-note .rc-type { color: #8b949e; }
+        .rule-change-note .rc-status { font-weight: 600; }
+        .rule-change-note .rc-status.warn { color: #f85149; }
+        .rule-change-note .rc-status.ok { color: #3fb950; }
         .date-input { background: #0d1117; color: #e6edf3; border: 1px solid #30363d; border-radius: 4px; padding: 3px 6px; font-size: 12px; font-family: inherit; color-scheme: dark; }
         #dd-measure-result { display: none; text-align: center; margin: 8px auto; max-width: 860px; font-size: 13px; background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 6px 12px; color: #e6edf3; }
         /* 指数回测工具 */
@@ -673,6 +684,7 @@
                 <div class="chart-box">
                     <div class="chart-title" id="main-chart-title" style="text-align:center; margin-bottom:15px;">中证红利全收益 累计净值走势</div>
                     <div id="chart-main"></div>
+                    <div id="rule-change-note" class="rule-change-note"></div>
                 </div>
             
                 <!-- 1.5 各年度收益图（年度收益为正：0轴上方红色柱；为负：0轴下方绿色柱） -->
@@ -5131,6 +5143,7 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
                     ['选样', '按<b>过去三年平均现金股息率</b>由高到低排名，选取 <b>100</b> 只'],
                     ['加权', '<b>股息率加权</b>；单样本 ≤10%，总市值 100 亿以下样本 ≤0.5%'],
                     ['调样', '<b>每年一次</b>（12 月第二个星期五的下一交易日），原样本设缓冲区'],
+                    ['修订', '<b>2022-12-12 实施修订</b>（连续分红由过去 2 年升为 3 年、选样改取三年平均股息率、设单样本 ≤10% 且百亿以下 ≤0.5%）；<b>已按新规则回溯历史数据</b>（官方历史模拟测算年化 9.3%→10.2%）'],
                 ]
             },
             '智选高股息全收益': {
@@ -5186,6 +5199,7 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
                     ['选样', '剔除成交额/总市值后 20%、亏损股；剔除过去 12 季度 ROE 均值后 20%、ROE 波动率前 20%、自由现金流率后 50%；按<b>价值得分</b>（市盈率倒数 + 股息率 + 自由现金流率，金融地产不含第三项）取 <b>100</b> 只'],
                     ['加权', '<b>价值得分倾斜的自由流通市值加权</b>；单样本 ≤8%，国证二级行业 ≤20%'],
                     ['调样', '<b>每季度一次</b>（3/6/9/12 月第二个星期五的下一交易日），每次 ≤50%'],
+                    ['修订', '<b>2024-10-29 实施重构</b>（原代码 CN6027→980081、选样逻辑完全重写：新增 ROE 稳定性与自由现金流筛选、季度调样、行业/个股权重上限）；<b>已按新规则回溯历史数据</b>（历史点位于 2024-10 修正更新）'],
                 ]
             },
             '国信价值全收益': {
@@ -5198,6 +5212,7 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
                     ['选样', '要求<b>过去六期 ROE(TTM) 均值 ≥12% 且每期 ≥8%</b>；再按 <b>PE / PB / 股息率</b>标准化后加总的<b>价值因子综合得分</b>，取前 <b>100</b> 只'],
                     ['加权', '<b>等权重</b>（权重因子令 100 只样本各约 1%，实测均值 1.000%）'],
                     ['调样', '<b>每半年一次</b>（6/12 月第二个星期五的下一交易日），单次调整比例一般 ≤20%；缓冲区：近三期 ROE&gt;10% 的老样本保留、得分前 80 的新样本优先、前 120 的老样本优先'],
+                    ['修订', '<b>2022-11-24 编制方案大修</b>（ROE 门槛由三期均值≥10% 升至六期均值≥12% 且单期≥8%、新增大股东质押/商誉/ESG 剔除、成交额由后 10% 收紧为前 80%）；中证官网未披露修订后回测，<b>历史数据未回溯</b>，修改日前后口径不一致、不可直接横比'],
                     ['数据', '全收益 <b>H21052</b> 取中证官网；估值只算<b>加权股息率</b>（官网等权权重 × 个股股息率），不展示 PE/PB'],
                 ]
             },
@@ -5211,6 +5226,7 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
                     ['低波', '对入选 100 只按<b>过去 12 个月实际波动率</b>（以交易货币计的每日价格收益标准差）<b>升序</b>排列'],
                     ['成样', '波动率最低的 <b>50</b> 只构成指数；缓冲规则：现有成分股股息率位列前 100 且波动率排名<b>前 60</b>，则保留在指数中'],
                     ['归因', '第 2 步的 100 只构成「高股息 100」归因指数；第 4 步未入选的 50 只构成「高波动率 50」归因指数'],
+                    ['修订', '<b>2026-02-02 实施修订</b>（流动性筛选由 3 月日均成交额改为中位数、权重约束引入流动性区间、再平衡参考日由 7 天改为 12 天）；标普自生效日起应用新规，<b>历史点位未回溯</b>'],
                     ['数据', '<b>点位为 Wind 官方日频</b>：自 2016-09-30 起取 <b>SPCLLHCT.SPI</b>（标普中国A股大盘红利低波50全收益）逐日收盘，无推算；<b>成份股权重、总市值、申万行业同样取自 Wind</b>（标普道琼斯不公开指数权重文件），按 ISO 周缓存、<b>每周只刷新一次</b>省积分；估值表只展示股息率（Wind 指数权重 × 个股股息率加权）。Wind 取数失败才回退 515450 全持仓（滞后一个报告期、口径为占净值比），画像上会标注「515450 持仓占比」'],
                 ]
             },
@@ -5221,7 +5237,7 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
                 rows: [
                     ['样本', '沪深两市全部上市公司，剔除 <b>ST、*ST 及退市警示标的</b>'],
                     ['选样', '选取<b>市值最小的 400 只</b>股票作为成份'],
-                    ['加权', '<b>等权重</b>；<b>2025-01-02 起改为每月调仓</b>（此前为每日调仓），官方口径称「可更稳定反映微盘股票的整体表现」'],
+                    ['加权', '<b>等权重</b>；<b>2025-01-02 起改为每月调仓</b>（此前为每日调仓），官方口径称「可更稳定反映微盘股票的整体表现」；改月频后<b>历史点位未回溯</b>（仍为原日频等权口径，8841431 日频等权指数延续日频、此前两者点位完全重合）'],
                     ['说明', 'Wind 概念指数，<b>无可交易产品</b>；点位只取 <b>Wind 官方日频</b>（868008.WI），不做任何推算——接口异常时保留上一交易日收盘，等下次更新补齐'],
                 ]
             },
@@ -5260,6 +5276,34 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
                     ['产品', '跟踪产品为<b>南方东西精选 ETF（03441.HK）</b>：2025-03-31 上市，2025-11-10 纳入南向 ETF 通'],
                 ]
             },
+        };
+
+        // 指数编制规则变更事件：用于在「累计净值走势」主图中标注规则修改时间点，
+        // 并注明历史数据是否回溯。backfilled=false → 修改后历史点位未按新规则回溯，
+        // 修改日前后曲线口径不一致、不可直接横比；backfilled=true → 指数公司已按新
+        // 规则回溯历史点位，曲线前后口径一致。未列入此表的指数 = 发布以来编制规则
+        // 无实质性变更（红利低波/红利低波100 的 2020 版更新仅为样本空间表述规范）。
+        const RULE_CHANGE_EVENTS = {
+            '国信价值全收益': [
+                { date: '2022-11-24', type: '编制方案大修', note: '未回溯历史数据', backfilled: false,
+                  desc: 'ROE门槛由三期均值≥10%升至六期均值≥12%且单期≥8%，新增质押>80%、商誉占净资产>80%、ESG C及以下剔除，成交额由后10%收紧为后20%；中证官网未披露修订后回测，历史点位仍为老规则口径' }
+            ],
+            '中证红利全收益': [
+                { date: '2022-12-12', type: '编制方案修订', note: '已回溯历史数据', backfilled: true,
+                  desc: '连续分红由过去2年升至3年、选样改取三年平均股息率、设单样本≤10%且百亿以下≤0.5%；官方经历史模拟测算（年化9.3%→10.2%）并按新规则回溯历史点位' }
+            ],
+            '价值100全收益': [
+                { date: '2024-10-29', type: '编制方案重构', note: '已回溯历史数据', backfilled: true,
+                  desc: '代码CN6027→980081、选样逻辑完全重写（新增ROE稳定性与自由现金流筛选、季度调样、行业/个股权重上限）；国证已按新规则回溯更新历史数据' }
+            ],
+            '标普红利低波50全收益': [
+                { date: '2026-02-02', type: '编制规则修订', note: '未回溯历史数据', backfilled: false,
+                  desc: '流动性筛选由3月日均成交额改为中位数、权重约束引入流动性区间、参考日由7天改为12天；标普自生效日起应用新规，历史点位不重算' }
+            ],
+            '万得微盘股指数': [
+                { date: '2025-01-02', type: '调仓频率变更', note: '未回溯历史数据', backfilled: false,
+                  desc: '由每日调仓改为每月调仓；历史点位仍为原日频等权口径（8841431日频等权指数继续延续日频，两者此前点位完全重合）' }
+            ]
         };
 
         function renderRules(name) {
@@ -5786,6 +5830,35 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
 
             // 1. 主图：净值 + 近10年对数趋势线（不画标准差通道）
             const band = computeTrendLine(data.dates, data.values);
+            // 规则变更标注：在点位曲线上叠加 markLine 竖线（红=未回溯历史、绿=已回溯历史），
+            // 具体文字说明放在图表下方的横向说明条里（不透明、不遮曲线）。
+            const ruleEvents = RULE_CHANGE_EVENTS[currentIndex] || [];
+            const ruleMarkLines = ruleEvents.map(ev => ({
+                name: ev.date + ' ' + ev.type,
+                xAxis: ev.date,
+                silent: true,
+                symbol: 'none',
+                label: { show: false },
+                lineStyle: { color: ev.backfilled ? '#3fb950' : '#f85149', type: 'dashed', width: 1.5, opacity: 0.85 }
+            }));
+            // 图表下方横向说明条（图表外，不遮挡曲线）
+            const ruleNoteEl = document.getElementById('rule-change-note');
+            if (ruleNoteEl) {
+                if (ruleEvents.length) {
+                    ruleNoteEl.style.display = 'flex';
+                    ruleNoteEl.innerHTML = ruleEvents.map(ev =>
+                        '<span class="rc-item ' + (ev.backfilled ? 'ok' : 'warn') + '" title="' + ev.desc + '">'
+                        + '<span class="rc-dot" style="background:' + (ev.backfilled ? '#3fb950' : '#f85149') + ';"></span>'
+                        + '<span class="rc-date">' + ev.date + '</span>'
+                        + '<span class="rc-type">' + ev.type + '</span>'
+                        + '<span class="rc-status ' + (ev.backfilled ? 'ok' : 'warn') + '">' + ev.note + '</span>'
+                        + '</span>'
+                    ).join('');
+                } else {
+                    ruleNoteEl.style.display = 'none';
+                    ruleNoteEl.innerHTML = '';
+                }
+            }
             mainChart.setOption({
                 ...chartOptBase,
                 title: { show: false },
@@ -5825,6 +5898,7 @@ const pepbHistory = {"中证红利":{"dates":["2016-10-17","2016-10-18","2016-10
                     {
                         name: '点位', type: 'line', data: data.values, sampling: 'lttb', showSymbol: false,
                         lineStyle: { width: 2, color: '#58a6ff' }, z: 5,
+                        markLine: { symbol: 'none', data: ruleMarkLines, z: 8 },
                         areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{ offset: 0, color: 'rgba(88,166,255,0.15)' }, { offset: 1, color: 'rgba(88,166,255,0)' }]) }
                     },
                     // 趋势线：浅灰虚线，不抢净值曲线的视觉。color 决定图例色块
