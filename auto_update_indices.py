@@ -1373,6 +1373,45 @@ def fetch_wind_history(code, last_saved_date):
     return {}
 
 
+def wind_latest_pb_date(windcode="868008.WI", since_date=None):
+    """探测 Wind 上该指数最新、且已定稿的 PB 交易日（不早于 since_date）。
+
+    万得微盘股指数 868008 在 Wind 上有「点位滞后、估值当日」的不同步：
+    get_index_kline 的点位往往要 T+1 才补上前一交易日，而 get_index_fundamentals
+    的逐日 PB 当日收盘就有。拥挤度 / 估值水位用的是 PB 而不是点位，这里单独
+    探测 PB 的最新交易日，让估值不被点位滞后拖累、比值图追到最新那天。
+
+    注意：A 股 15:00 收盘，15:00 之前 Wind 会把「今天」也列进逐日序列、但值
+    是上一交易日收盘值的占位（实测 11-23 早盘查序列，11-23 被填成 11-20 的
+    1.6726）。因此 15:00 前探测到「今天」必须回退到上一个真实交易日，否则会
+    把昨天的 PB 误写成今天。
+    探测失败或没有更新的日期时，原样返回 since_date（调用方退回点位末日）。
+    """
+    if not wind_configured():
+        return since_date
+    try:
+        begin = ((datetime.strptime(since_date, "%Y-%m-%d") - timedelta(days=3))
+                 .strftime("%Y-%m-%d") if since_date else None)
+        now = now_cn()
+        end = now.strftime("%Y-%m-%d")
+        series = wind_index_pb_series(windcode, begin or end, end)
+        if series:
+            dates = sorted(series)
+            latest = dates[-1]
+            # 今天尚未收盘（15:00 前）：Wind 返回的「今天」是上一交易日收盘值的
+            # 占位，不能当作已定稿的最新日，回退到上一个真实交易日。
+            if latest == end and now.hour < 15:
+                if len(dates) >= 2:
+                    latest = dates[-2]
+                else:
+                    return since_date
+            if not since_date or latest > since_date:
+                return latest
+    except Exception as e:
+        print(f"微盘估值：探测最新 PB 交易日失败，沿用 {since_date}: {e}")
+    return since_date
+
+
 
 
 # ===== 微盘股每日估值自算（PB / 市值中位数） =====
@@ -1504,6 +1543,24 @@ def _apply_micro_daily(data_obj, trade_date):
             return False
 
     changed = False
+
+    # 防御：剔除 pb_daily / mcap_daily 里晚于 trade_date 的脏点。
+    # 点位（get_index_kline）T+1 滞后、而估值日可能因探测回退（如 15:00 前把
+    # 「未收盘的今天」退回上一交易日），旧数据里可能残留未来日期的占位点；
+    # 这里统一裁掉，保证序列最末日不越过本次估值目标日。
+    for _skey in ("pb_daily", "mcap_daily"):
+        _s = data_obj.get(_skey)
+        if not _s or not _s.get("dates"):
+            continue
+        _keep = [i for i, d in enumerate(_s["dates"]) if d <= trade_date]
+        if len(_keep) != len(_s["dates"]):
+            _n_drop = len(_s["dates"]) - len(_keep)
+            _cols = ("dates", "pb", "point") if _skey == "pb_daily" else ("dates", "value", "point")
+            for _c in _cols:
+                if _c in _s:
+                    _s[_c] = [_s[_c][i] for i in _keep]
+            changed = True
+            print(f"微盘估值：{_skey} 剔除 {_n_drop} 个晚于 {trade_date} 的脏点")
 
     # 当日指数点位（用于图右侧点位线）
     point = None
@@ -2929,7 +2986,15 @@ def update_html(file_path):
         if source == "WIND":
             # Wind 可用时取官方加权 PB 与成份股总市值中位数；不可用时回退
             # 全市场「市值最小 400 只」自算（官方值截至 2026-11-05，之后为自算口径）。
-            if _apply_micro_daily(all_data[name], all_data[name]["dates"][-1]):
+            # 868008 的点位（get_index_kline）T+1 滞后发布，但官方 PB 当日收盘就有：
+            # 估值目标日取「点位末日」与「Wind 最新 PB 日」的较晚者，避免 PB /
+            # 拥挤度 / 估值水位被点位滞后拖累晚一天（点位本身仍按 Wind 发布时点补）。
+            micro_last = all_data[name]["dates"][-1]
+            micro_trade_date = wind_latest_pb_date("868008.WI", micro_last)
+            if micro_trade_date != micro_last:
+                print(f"微盘估值：点位末日在 {micro_last}，PB 已更新至 {micro_trade_date}，"
+                      f"估值按 {micro_trade_date} 写入（点位稍后由 Wind 补齐）")
+            if _apply_micro_daily(all_data[name], micro_trade_date):
                 updated_any = True
 
 
