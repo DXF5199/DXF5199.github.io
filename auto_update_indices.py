@@ -67,11 +67,6 @@ INDEX_CONFIG = [
     # 纳斯达克100指数（价格收益 NDX）：美股指数，数据源为腾讯行情日 K。
     # 注意为价格指数口径（不含股息再投资），与 A 股全收益指数口径不同。
     {"code": "usNDX", "name": "纳斯达克100指数", "source": "US"},
-    # 富时ETF通东西传承股票精选指数（CFIIECMA.FI，FTSE 编制）：港股口径、价格指数
-    #（不含股息再投资），2024-09-26 发布，基点 1000。Wind 上有完整日线，直接取官方
-    # K 线（source=WINDIDX），不推算、不回退其它源。只在指数分析台与指数回测工具
-    # 出现，市场行情看板不展示（见 HTML 的 DASHBOARD_EXCLUDED_INDICES）。
-    {"code": "CFIIECMA.FI", "name": "富时ETF通东西传承", "source": "WINDIDX"},
     # 回测工具的比较基准：仅用于回测对照，不展示在画像/估值等模块
     {"code": "H00300", "name": "沪深300全收益", "source": "CSI", "benchmark_only": True,
      "wind_code": "H00300.CSI"}
@@ -225,9 +220,8 @@ WIND_CODES = {
     "纳斯达克100指数": "NDX.GI",
     "沪深300全收益": "H00300.CSI",
 }
-# 富时ETF通东西传承（CFIIECMA.FI）的行情起点：指数发布日。
-# 首次纳入工具时从这天开始取，之后每次只回看最近 10 天做增量覆盖。
-WINDIDX_FIRST_DATE = "2024-09-26"
+# WINDIDX 指数的默认历史起点（未单独指定 first_date 时使用）。
+WINDIDX_FIRST_DATE = "2015-01-01"
 # 走免费数据源的指数（INDEX_CONFIG 里标了 free_only 的）：点位、估值、成分股、行业
 # 全部用中证官网免费接口，一律不调用 Wind，省积分。
 FREE_ONLY_INDICES = {item["name"] for item in INDEX_CONFIG if item.get("free_only")}
@@ -2869,7 +2863,7 @@ def update_html(file_path):
                 # 美股指数（如纳斯达克100）：腾讯行情日 K（免费，隔夜就有收盘）
                 recent_data = fetch_us_history(code, last_saved_date)
             elif source == "WINDIDX":
-                # Wind 官方指数日线直取（富时 ETF 通东西传承 CFIIECMA.FI）：只认 Wind，
+                # Wind 官方指数日线直取（如万得微盘股日频等权 8841431.WI）：只认 Wind，
                 # 没有免费源也没有可推算的代理标的，取不到就保留旧数据等下次运行。
                 # 回看 10 天而不是从末点开始：Wind 的收盘值偶有盘中未定稿、次日修正，
                 # 这段重叠窗口会把最近几天重新覆盖一遍，避免把坏值永久留在文件里。
